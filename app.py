@@ -1,349 +1,617 @@
 # app.py
-import os
-import csv
-import io
+# Hungarian Conjugation and Declension Practice
+# Python 3.12 • Streamlit app with optional GitHub-backed corpus loading
+# Accuracy first: CSV overrides > NYTK mT5 generator (optional) > rule engine fallback
+
+from __future__ import annotations
+
+import json
 import random
-import unicodedata
+import re
+from dataclasses import dataclass
+from functools import lru_cache
+from io import BytesIO
+from typing import Dict, Optional, Tuple
+
+import pandas as pd
 import streamlit as st
 
-# ----------------------------
-# Hugging Face cache locations
-# ----------------------------
-# These help Streamlit Cloud keep the model between runs.
-os.environ.setdefault("TRANSFORMERS_CACHE", "/mount/data/transformers")
-os.environ.setdefault("HF_HOME", "/mount/data/hf_home")
-os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+# Optional GitHub integration
+try:
+    from github import Github  # pip install PyGithub
+    _GITHUB_OK = True
+except Exception:
+    _GITHUB_OK = False
 
-# ----------------------------
-# Page and theme
-# ----------------------------
-st.set_page_config(page_title="Hungarian Morphology Trainer", page_icon="🇭🇺", layout="centered")
-st.markdown("""
-<style>
-:root{
-  --navy:#0a2540;
-  --cream:#fff6e6;
-  --ink:#0d1b2a;
-  --muted:#5b6b83;
-  --ok:#16a34a;
-  --bad:#dc2626;
-  --chip:#e8eef7;
-}
-html, body, [class*="css"]{font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;}
-body{background: var(--cream);}
-.block-container{padding-top:1.0rem; padding-bottom:1.25rem;}
+# Optional neural morphological generator (accurate but heavy on first load)
+_TRANSFORMERS_OK = False
+try:
+    from transformers import pipeline  # pip install transformers torch sentencepiece
+    _TRANSFORMERS_OK = True
+except Exception:
+    pass
 
-h1,h2,h3{color:var(--navy);}
+# ------------------------- UI THEME AND STYLES -------------------------
 
-/* primary button with motion */
-.stButton>button[kind="primary"]{
-  background: linear-gradient(135deg, #0a2540, #1f6f8b);
-  border:0; color:#fff; padding:.62rem 1.1rem; border-radius:12px;
-  box-shadow:0 6px 18px rgba(10,37,64,.25);
-  transition:transform .08s ease-out, box-shadow .15s ease;
-}
-.stButton>button[kind="primary"]:hover{ transform: translateY(-1px); }
-.stButton>button:not([kind="primary"]){
-  background:#fff; border:1px solid #e6eaf0; color:#0a2540;
-  padding:.55rem 1rem; border-radius:12px;
-}
+st.set_page_config(
+    page_title="Hungarian Conjugations & Declensions Trainer",
+    page_icon="🇭🇺",
+    layout="wide",
+)
 
-/* prompt chip */
-.prompt-chip{
-  display:inline-block; background:#eaf0ff; color:#0a2540;
-  padding:.5rem .8rem; border-radius:12px; font-weight:700;
-}
-.case-chip{ background:#fff0da; }
-.verb-chip{ background:#e6f5ff; }
+st.markdown(
+    """
+    <style>
+    .big-title { font-size: 1.8rem; font-weight: 700; letter-spacing: .2px; margin-bottom: .25rem; }
+    .subtitle { color: #666; margin-bottom: 1rem; }
+    .prompt-card {
+        border: 1px solid #e6e9ef;
+        padding: 1rem 1.25rem;
+        border-radius: 10px;
+        background: #fafbff;
+        box-shadow: 0 1px 0 rgba(16,24,40,.02);
+        margin-bottom: 1rem;
+    }
+    .good { color: #0a7f2e; font-weight: 700; }
+    .bad { color: #b21b1b; font-weight: 700; }
+    .pill { display: inline-block; font-size: .85rem; padding: .1rem .5rem; border: 1px solid #e2e8f0; border-radius: 999px; margin-right: .35rem; background: white; }
+    .muted { color: #6b7280; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-/* feedback pills */
-.feedback{ display:inline-block; padding:.52rem .9rem; border-radius:999px; font-weight:700;}
-.feedback.ok{ background:var(--ok); color:#fff;}
-.feedback.bad{ background:var(--bad); color:#fff;}
+st.markdown('<div class="big-title">Hungarian Conjugations and Declensions</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Practice accurate present‑tense verb forms and core noun cases with a fast, clean workflow.</div>', unsafe_allow_html=True)
 
-/* card shell */
-.card{
-  background:#fff;
-  border-radius:18px;
-  padding:1.0rem 1.1rem .9rem 1.1rem;
-  box-shadow:0 10px 28px rgba(10,37,64,.08);
-}
-.header-wrap{ text-align:center; margin-bottom:.6rem;}
-.header-title{ color:var(--muted); font-size:.95rem; }
-.header-lemma{ color:var(--navy); font-size:1.9rem; font-weight:800; }
-.underline{height:2px; width:78%; background:#0a2540; opacity:.2; margin:.6rem auto .5rem auto; border-radius:2px;}
+# ------------------------- DATA TYPES -------------------------
 
-/* input shaping */
-input[type="text"]{ border-radius:12px !important; }
-</style>
-""", unsafe_allow_html=True)
+@dataclass(frozen=True)
+class VerbTask:
+    lemma: str
+    gloss: str
+    definite: bool  # True = definite conjugation, False = indefinite
+    person: int     # 1..3
+    number: str     # "Sing" or "Plur"
+    is_ik: bool     # -ik verb behavior hints
+    ud_key: str     # UD-style feature key for generator/CSV overrides
 
-# ----------------------------
-# Utilities
-# ----------------------------
-PRONOUNS = {"1Sg":"én","2Sg":"te","3Sg":"ő","1Pl":"mi","2Pl":"ti","3Pl":"ők"}
 
-def normalize(s: str) -> str:
-    return unicodedata.normalize("NFC", s.strip().lower())
+@dataclass(frozen=True)
+class NounTask:
+    lemma: str
+    gloss: str
+    case: str       # "Ine" or "Ade" (inessive/adessive)
+    ud_key: str     # UD-style feature key for generator/CSV overrides
 
-def strip_diacritics(s: str) -> str:
-    return ''.join(ch for ch in unicodedata.normalize("NFD", s) if unicodedata.category(ch) != "Mn")
 
-def answers_equal(a: str, b: str, strict_accents: bool) -> bool:
-    a = normalize(a); b = normalize(b)
-    if strict_accents:
-        return a == b
-    return strip_diacritics(a) == strip_diacritics(b)
+# ------------------------- SETTINGS SIDEBAR -------------------------
 
-# ----------------------------
-# Model loader and generator
-# ----------------------------
-@st.cache_resource(show_spinner=False)
-def load_generator():
-    # model requires sentencepiece
-    try:
-        import sentencepiece  # noqa: F401
-    except Exception:
-        st.error("Missing dependency: sentencepiece. Add `sentencepiece>=0.1.99` to requirements.txt and redeploy.")
-        st.stop()
-
-    from transformers import pipeline
-    # device_map="auto" chooses CPU on Streamlit Cloud
-    return pipeline(
-        task="text2text-generation",
-        model="NYTK/morphological-generator-emmorph-mt5-hungarian",
-        device_map="auto"
+with st.sidebar:
+    st.header("Settings")
+    source = st.radio(
+        "Corpus source",
+        ["Upload CSV", "Load from GitHub"],
+        help="Provide one corpus CSV with both verbs and nouns. The app caches it for speed."
     )
 
-def build_prompt(lemma: str, pos_code: str, tag: str) -> str:
-    # Store pos_code as "/N" or "/V" without brackets, add exactly one bracketed POS here.
-    pos = pos_code.strip()
-    if pos.startswith("[") and pos.endswith("]"):
-        pos = pos[1:-1]
-    return f"morph: {lemma} [{pos}]{tag}"
+    df: Optional[pd.DataFrame] = None
 
-@st.cache_data(show_spinner=False)
-def generate_one(lemma: str, pos_code: str, tag: str) -> str:
-    gen = load_generator()
-    out = gen(build_prompt(lemma, pos_code, tag), max_new_tokens=8)[0]["generated_text"]
-    return out.strip()
+    # GitHub settings
+    if source == "Load from GitHub":
+        repo_full = st.text_input("owner/repo", placeholder="yourname/yourrepo")
+        path_in_repo = st.text_input("path in repo", value="data/hungarian_corpus.csv")
+        ref = st.text_input("branch or tag", value="main")
+        token_hint = "Place your PAT in Streamlit secrets as GITHUB_TOKEN."
+        st.caption(token_hint)
 
-# ----------------------------
-# Sidebar controls
-# ----------------------------
-with st.sidebar:
-    st.title("Practice settings")
+        def load_from_github() -> Optional[pd.DataFrame]:
+            if not _GITHUB_OK:
+                st.error("PyGithub is not installed. Run: pip install PyGithub")
+                return None
+            token = st.secrets.get("GITHUB_TOKEN", None)
+            if not token:
+                st.error("GITHUB_TOKEN is missing from Streamlit secrets.")
+                return None
+            try:
+                gh = Github(token)
+                repo = gh.get_repo(repo_full)
+                f = repo.get_contents(path_in_repo, ref=ref)
+                content = f.decoded_content
+                return pd.read_csv(BytesIO(content))
+            except Exception as e:
+                st.error(f"GitHub load failed: {e}")
+                return None
 
-    st.subheader("What to practice")
-    c1, c2 = st.columns(2)
-    with c1:
-        opt_ine = st.checkbox("Inessive", value=True, help="Noun case: -ban / -ben")
-        opt_prs_indef = st.checkbox("Present indefinite", value=True)
-    with c2:
-        opt_ade = st.checkbox("Adessive", value=True, help="Noun case: -nál / -nél")
-        opt_prs_def = st.checkbox("Present definite", value=False)
-
-    strict_accents = st.toggle("Require accents for answers", value=False, help="Turn on to require correct diacritics.")
-    warm = st.button("Initialize model now", help="Loads the generator so the first check is instant.")
-    if warm:
-        _ = load_generator()
-        st.success("Model ready.")
+        if st.button("Load CSV from GitHub"):
+            df = load_from_github()
+    else:
+        uploaded = st.file_uploader("Upload corpus CSV", type=["csv"])
+        if uploaded is not None:
+            try:
+                df = pd.read_csv(uploaded)
+            except Exception as e:
+                st.error(f"CSV parse failed: {e}")
 
     st.divider()
-    st.subheader("Lemmas")
-    source = st.radio("Choose your list", ["Sample list", "Upload CSVs"])
-    nouns_file = verbs_file = None
-    if source == "Upload CSVs":
-        with st.popover("How to format CSVs"):
-            st.write("Upload two CSV files with a header named `lemma` and one lemma per row, UTF‑8 encoded.")
-            st.code("lemma\nház\nkönyv\nember\n", language="text")
-            st.code("lemma\nlát\nír\nszeret\n", language="text")
-        nouns_file = st.file_uploader("Upload nouns.csv", type=["csv"])
-        verbs_file = st.file_uploader("Upload verbs.csv", type=["csv"])
 
-# ----------------------------
-# Lemma loading
-# ----------------------------
-SAMPLE_NOUNS = ["ház","ablak","asztal","könyv","ember","város","kert","kút","madár","téma"]
-SAMPLE_VERBS = ["lát","ír","olvas","mond","mos","tör","tanul","szeret","ad","vesz"]
+    st.subheader("Practice scope")
+    want_verbs = st.checkbox("Verbs", value=True)
+    want_nouns = st.checkbox("Nouns", value=True)
 
-def read_lemmas(upload) -> list[str]:
-    text = upload.getvalue().decode("utf-8")
-    # Try DictReader first for header "lemma"
+    st.caption("Verb modes")
+    verb_modes = st.multiselect(
+        "Present tense",
+        options=["Indefinite", "Definite"],
+        default=["Indefinite", "Definite"],
+        help="Indefinite vs. definite conjugation endings in Hungarian present tense."
+    )
+
+    st.caption("Noun modes")
+    noun_modes = st.multiselect(
+        "Cases",
+        options=["Inessive", "Adessive"],
+        default=["Inessive", "Adessive"],
+        help="Inessive is -ban/-ben. Adessive is -nál/-nél."
+    )
+
+    st.divider()
+
+    advanced = st.expander("Advanced accuracy")
+    with advanced:
+        prefer_ml = st.selectbox(
+            "Inflection strategy",
+            ["CSV overrides first, then ML generator, then rules", "CSV overrides only", "CSV overrides then rules only"],
+            help="For maximum accuracy choose the ML generator path. It uses NYTK’s mT5 model and UD features."
+        )
+        ignore_accents = st.checkbox("Accept answers that ignore accents", value=True)
+        show_hu_pronouns = st.checkbox("Show Hungarian pronouns for verb prompts", value=True)
+        allow_reveal = st.checkbox("Allow Reveal Answer", value=True)
+        st.caption("The ML generator requires Transformers and will download a model on first use.")
+
+# ------------------------- CSV CONTRACT -------------------------
+
+CSV_TEMPLATE = """
+pos,lemma,english,is_ik,forms
+VERB,kér,to ask,False,"{""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=1|Number=Sing|Definite=Ind"": ""kérek"", ""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=3|Number=Plur|Definite=Def"": ""kérik""}"
+VERB,dolgozik,to work,True,"{""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=1|Number=Sing|Definite=Ind"": ""dolgozom"", ""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=3|Number=Sing|Definite=Ind"": ""dolgozik""}"
+NOUN,iroda,office,, "{""NOUN Case=Ine|Number=Sing"": ""irodában"", ""NOUN Case=Ade|Number=Sing"": ""irodánál""}"
+NOUN,bolt,shop,, "{""NOUN Case=Ine|Number=Sing"": ""boltban"", ""NOUN Case=Ade|Number=Sing"": ""boltnál""}"
+""".strip()
+
+with st.sidebar:
+    st.download_button("Download CSV template", data=CSV_TEMPLATE, file_name="hungarian_corpus_template.csv", mime="text/csv")
+
+# ------------------------- CORE UTILITIES -------------------------
+
+BACK_VOWELS = set("aáoóuú")
+FRONT_UNR = set("eéií")
+FRONT_R = set("öőüű")
+ALL_VOWELS = BACK_VOWELS | FRONT_UNR | FRONT_R
+
+def has_back(s: str) -> bool:
+    return any(ch in BACK_VOWELS for ch in s)
+
+def has_front_rounded(s: str) -> bool:
+    return any(ch in FRONT_R for ch in s)
+
+def last_vowel_group(s: str) -> str:
+    # Helps select linking vowels
+    last = None
+    for ch in s.lower():
+        if ch in ALL_VOWELS:
+            last = ch
+    return last or "a"
+
+def harmony_set(s: str) -> str:
+    # "back", "front_unr", "front_r"
+    if has_back(s):
+        return "back"
+    if has_front_rounded(s):
+        return "front_r"
+    return "front_unr"
+
+ACCENT_STRIP = str.maketrans(
+    {
+        "á":"a","é":"e","í":"i","ó":"o","ö":"o","ő":"o","ú":"u","ü":"u","ű":"u",
+        "Á":"a","É":"e","Í":"i","Ó":"o","Ö":"o","Ő":"o","Ú":"u","Ü":"u","Ű":"u",
+    }
+)
+
+def normalize_answer(s: str, strip_accents: bool) -> str:
+    s = s.strip()
+    if strip_accents:
+        s = s.translate(ACCENT_STRIP)
+    return s.lower()
+
+# ------------------------- RULE ENGINE (TARGETED) -------------------------
+
+class HuRules:
+    """Rule-based generator for specific practice modes.
+    Nouns: Inessive (-ban/-ben) and Adessive (-nál/-nél).
+    Verbs: Present tense, prioritizing regular patterns. -ik handling for 1sg and 3sg (indef)."""
+
+    @staticmethod
+    def inessive(noun: str) -> str:
+        h = harmony_set(noun)
+        return noun + ("ban" if h == "back" else "ben")
+
+    @staticmethod
+    def adessive(noun: str) -> str:
+        h = harmony_set(noun)
+        return noun + ("nál" if h == "back" else "nél")
+
+    @staticmethod
+    def is_ik(lemma: str, csv_flag: Optional[bool]) -> bool:
+        if csv_flag is True:
+            return True
+        if csv_flag is False:
+            return False
+        return lemma.endswith("ik")
+
+    @staticmethod
+    def present_indef(lemma: str, person: int, number: str, is_ik: bool) -> str:
+        h = harmony_set(lemma)
+        v_ok = {"back": "ok", "front_unr": "ek", "front_r": "ök"}[h]
+        v_1pl = {"back": "unk", "front_unr": "ünk", "front_r": "ünk"}[h]
+        v_2pl = {"back": "tok", "front_unr": "tek", "front_r": "tök"}[h]
+        v_3pl = {"back": "nak", "front_unr": "nek", "front_r": "nek"}[h]
+
+        if number == "Sing" and person == 1:
+            if is_ik:
+                v = {"back": "om", "front_unr": "em", "front_r": "öm"}[h]
+                return lemma.removesuffix("ik") + v if lemma.endswith("ik") else lemma + v
+            return lemma + v_ok
+        if number == "Sing" and person == 2:
+            if re.search(r"(s|z|sz|zs)$", lemma):
+                link = {"back": "ol", "front_unr": "el", "front_r": "öl"}[h]
+                return lemma + link
+            return lemma + "sz"
+        if number == "Sing" and person == 3:
+            if is_ik:
+                base = lemma.removesuffix("ik") if lemma.endswith("ik") else lemma
+                return base + "ik"
+            return lemma
+        if number == "Plur" and person == 1:
+            return lemma + v_1pl
+        if number == "Plur" and person == 2:
+            return lemma + v_2pl
+        if number == "Plur" and person == 3:
+            return lemma + v_3pl
+        return lemma
+
+    @staticmethod
+    def present_def(lemma: str, person: int, number: str) -> str:
+        h = harmony_set(lemma)
+        v_1sg = {"back": "om", "front_unr": "em", "front_r": "öm"}[h]
+        v_2sg = {"back": "od", "front_unr": "ed", "front_r": "öd"}[h]
+        v_1pl = {"back": "juk", "front_unr": "jük", "front_r": "jük"}[h]
+        # Heuristic: after vowel use -játok, after consonant use -itek/-itek selection by harmony
+        v_2pl_cons = {"back": "játok", "front_unr": "itek", "front_r": "itek"}[h]
+        v_2pl_vow = {"back": "játok", "front_unr": "jétek", "front_r": "jétek"}[h]
+        v_3pl_default = {"back": "ják", "front_unr": "ik", "front_r": "ik"}[h]
+
+        ends_vowel = lemma[-1].lower() in ALL_VOWELS
+
+        if number == "Sing" and person == 1:
+            return lemma + v_1sg
+        if number == "Sing" and person == 2:
+            return lemma + v_2sg
+        if number == "Sing" and person == 3:
+            # Default to -ja/-je with assimilation for s/z endings; use -i for many -z verbs like "néz"
+            if re.search(r"(z)$", lemma):
+                return lemma + "i"
+            if re.search(r"(s|sz|zs)$", lemma):
+                # geminate sibilant + a/e
+                if lemma.endswith("sz"):
+                    base = lemma[:-2] + "ssz"
+                elif lemma.endswith("zs"):
+                    base = lemma[:-2] + "zzs"
+                elif lemma.endswith("s"):
+                    base = lemma[:-1] + "ss"
+                else:
+                    base = lemma
+                return base + ("a" if h == "back" else "e")
+            return lemma + ("ja" if h == "back" else "je")
+        if number == "Plur" and person == 1:
+            return lemma + v_1pl
+        if number == "Plur" and person == 2:
+            return lemma + (v_2pl_vow if ends_vowel else v_2pl_cons)
+        if number == "Plur" and person == 3:
+            # Many -z/-sz verbs use -ik, otherwise -ják/-ik by harmony; this is a heuristic.
+            if re.search(r"(z|sz|zs)$", lemma):
+                return lemma + "ik"
+            return lemma + v_3pl_default
+        return lemma
+
+
+# ------------------------- NYTK mT5 GENERATOR -------------------------
+
+@st.cache_resource(show_spinner=False)
+def get_nytk_generator():
+    if not _TRANSFORMERS_OK:
+        return None
     try:
-        rows = list(csv.DictReader(io.StringIO(text)))
-        if rows and "lemma" in rows[0]:
-            return [normalize(r["lemma"]) for r in rows if r.get("lemma")]
+        gen = pipeline(task="text2text-generation", model="NYTK/morphological-generator-ud-mt5-hungarian")
+        return gen
     except Exception:
-        pass
-    # Fallback: first column
-    return [normalize(r[0]) for r in csv.reader(io.StringIO(text)) if r]
+        return None
 
-def load_lemma_pools():
-    nouns = SAMPLE_NOUNS[:]
-    verbs = SAMPLE_VERBS[:]
-    if nouns_file is not None:
-        try:
-            nouns = read_lemmas(nouns_file)
-        except Exception:
-            st.error("Could not read nouns.csv. Ensure it has a 'lemma' header and UTF‑8 encoding.")
-    if verbs_file is not None:
-        try:
-            verbs = read_lemmas(verbs_file)
-        except Exception:
-            st.error("Could not read verbs.csv. Ensure it has a 'lemma' header and UTF‑8 encoding.")
-    return sorted(set(nouns)), sorted(set(verbs))
+def nyt_generate(lemma: str, ud_key: str) -> Optional[str]:
+    gen = get_nytk_generator()
+    if not gen:
+        return None
+    # UD format example: "morph: munka NOUN Case=Acc|Number=Sing"
+    prompt = f"morph: {lemma} {ud_key}"
+    try:
+        out = gen(prompt, max_new_tokens=12, num_return_sequences=1)[0]["generated_text"]
+        return out.strip()
+    except Exception:
+        return None
 
-nouns, verbs = load_lemma_pools()
+# ------------------------- CORPUS HANDLING -------------------------
 
-# ----------------------------
-# Tag pools using emMorph codes
-# ----------------------------
-NOUN_TAGS: list[tuple[str, str, str]] = []
-if opt_ine: NOUN_TAGS.append(("/N", "[Ine]", "Inessive"))
-if opt_ade: NOUN_TAGS.append(("/N", "[Ade]", "Adessive"))
+REQUIRED_COLS = {"pos", "lemma", "english"}
+OPTIONAL_COLS = {"is_ik", "forms"}
 
-VERB_TAGS: list[tuple[str, str, str]] = []
-if opt_prs_indef:
-    for p in ["1Sg","2Sg","3Sg","1Pl","2Pl","3Pl"]:
-        VERB_TAGS.append(("/V", f"[Prs.NDef.{p}]", f"Present indefinite · {PRONOUNS[p]}"))
-if opt_prs_def:
-    for p in ["1Sg","2Sg","3Sg","1Pl","2Pl","3Pl"]:
-        VERB_TAGS.append(("/V", f"[Prs.Def.{p}]", f"Present definite · {PRONOUNS[p]}"))
+def validate_corpus(df: pd.DataFrame) -> Tuple[bool, str]:
+    missing = REQUIRED_COLS - set(df.columns)
+    if missing:
+        return False, f"Missing required columns: {', '.join(missing)}"
+    return True, "ok"
 
-if not NOUN_TAGS and not VERB_TAGS:
-    st.info("Choose at least one option in the sidebar to begin.")
-    st.stop()
+@lru_cache(maxsize=4096)
+def lookup_override(forms_json: str | None, ud_key: str) -> Optional[str]:
+    if not forms_json or (isinstance(forms_json, float) and pd.isna(forms_json)):  # NaN safe
+        return None
+    try:
+        data = json.loads(forms_json)
+        # Two keys accepted: exact UD key or simplified fallback
+        return data.get(ud_key) or None
+    except Exception:
+        return None
 
-# ----------------------------
-# Exercise pool and state
-# ----------------------------
-def build_pool():
-    items = []
-    for lemma in nouns:
-        for pos, tag, label in NOUN_TAGS:
-            items.append(("N", lemma, pos, tag, label))
-    for lemma in verbs:
-        for pos, tag, label in VERB_TAGS:
-            items.append(("V", lemma, pos, tag, label))
-    random.shuffle(items)
-    return items
+def get_is_ik_flag(row) -> Optional[bool]:
+    try:
+        val = row.get("is_ik", None)
+        if pd.isna(val):
+            return None
+        if isinstance(val, bool):
+            return val
+        if str(val).strip().lower() in {"true", "1", "yes"}:
+            return True
+        if str(val).strip().lower() in {"false", "0", "no"}:
+            return False
+        return None
+    except Exception:
+        return None
 
-if "pool" not in st.session_state: st.session_state.pool = build_pool()
-if "idx" not in st.session_state: st.session_state.idx = 0
-if "score" not in st.session_state: st.session_state.score = 0
-if "seen" not in st.session_state: st.session_state.seen = 0
-if "current" not in st.session_state: st.session_state.current = None
+# ------------------------- QUESTION GENERATION -------------------------
 
-def next_question():
-    if st.session_state.idx >= len(st.session_state.pool):
-        random.shuffle(st.session_state.pool)
-        st.session_state.idx = 0
-        st.balloons()
-    kind, lemma, pos, tag, label = st.session_state.pool[st.session_state.idx]
-    if kind == "V":
-        p = tag.split(".")[-1].strip("]")
-        pron = PRONOUNS.get(p, "")
-        pretty = f"{pron} + {lemma}"
-        chip_class = "verb-chip"
-        sublabel = label
-    else:
-        pretty = f"{lemma} + {label}"
-        chip_class = "case-chip"
-        sublabel = "Case practice"
-    st.session_state.current = dict(kind=kind, lemma=lemma, pos=pos, tag=tag, pretty=pretty, chip_class=chip_class, sublabel=sublabel)
+PRONOUNS_HU = {
+    ("Sing", 1): "én",
+    ("Sing", 2): "te",
+    ("Sing", 3): "ő",
+    ("Plur", 1): "mi",
+    ("Plur", 2): "ti",
+    ("Plur", 3): "ők",
+}
 
-# controls row
-c1, c2, c3 = st.columns(3)
-with c1:
-    if st.button("Build or reset pool"):
-        st.session_state.pool = build_pool()
-        st.session_state.idx = 0
-        st.session_state.score = 0
-        st.session_state.seen = 0
-        st.session_state.current = None
-with c2:
-    if st.button("Reshuffle remaining"):
-        tail = st.session_state.pool[st.session_state.idx:]
-        random.shuffle(tail)
-        st.session_state.pool[st.session_state.idx:] = tail
-with c3:
-    st.caption(f"Items left this cycle: {max(0, len(st.session_state.pool) - st.session_state.idx)}")
+def make_ud_key_for_verb(definite: bool, person: int, number: str) -> str:
+    # UD-style feature bundle
+    # Example: VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=1|Number=Sing|Definite=Ind
+    dval = "Def" if definite else "Ind"
+    return f"VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person={person}|Number={'Sing' if number=='Sing' else 'Plur'}|Definite={dval}"
 
-if st.session_state.current is None:
-    next_question()
+def make_ud_key_for_noun(case: str) -> str:
+    # Case: "Inessive" -> "Ine", "Adessive" -> "Ade"
+    c = "Ine" if case == "Inessive" else "Ade"
+    return f"NOUN Case={c}|Number=Sing"
 
-# ----------------------------
-# Card UI
-# ----------------------------
-st.markdown('<div class="card">', unsafe_allow_html=True)
-st.markdown(f"""
-<div class="header-wrap">
-  <div class="header-title">{'verb' if st.session_state.current['kind']=='V' else 'noun'}</div>
-  <div class="header-lemma">{st.session_state.current['lemma']}</div>
-</div>
-""", unsafe_allow_html=True)
-st.markdown('<div class="underline"></div>', unsafe_allow_html=True)
+def choose_person_number() -> Tuple[int, str]:
+    person = random.choice([1, 2, 3])
+    number = random.choice(["Sing", "Plur"])
+    return person, number
 
-st.write("Type the correct form for:")
-st.markdown(f'<span class="prompt-chip {st.session_state.current["chip_class"]}">{st.session_state.current["pretty"]}</span>', unsafe_allow_html=True)
-st.caption(st.session_state.current["sublabel"])
-st.markdown('</div>', unsafe_allow_html=True)  # end card
+def next_task(df: pd.DataFrame) -> Tuple[str, Dict, str]:
+    # Returns ("verb" or "noun", payload dict, solution string)
+    scope = []
+    if want_verbs and verb_modes:
+        scope.append("verb")
+    if want_nouns and noun_modes:
+        scope.append("noun")
 
-# answer row
-user = st.text_input("Your answer", value="", placeholder="type here, then Check")
-col1, col2, col3 = st.columns([1,1,1])
-with col1:
-    check = st.button("Check", type="primary")
-with col2:
-    reveal = st.button("Show answer")
-with col3:
-    nxt = st.button("Next")
+    if not scope:
+        st.stop()
 
-fb = st.empty()
+    which = random.choice(scope)
 
-def show_feedback(ok: bool, gold: str):
+    if which == "verb":
+        sub = df[df["pos"].str.upper().eq("VERB")]
+        if sub.empty:
+            st.stop()
+        row = sub.sample(1).iloc[0]
+        definite = random.choice([m for m in ["Indefinite", "Definite"] if m in verb_modes]) == "Definite"
+        person, number = choose_person_number()
+        ud_key = make_ud_key_for_verb(definite, person, number)
+        is_ik = HuRules.is_ik(str(row["lemma"]), get_is_ik_flag(row))
+        task = VerbTask(
+            lemma=str(row["lemma"]),
+            gloss=str(row["english"]),
+            definite=definite,
+            person=person,
+            number=number,
+            is_ik=is_ik,
+            ud_key=ud_key
+        )
+        sol = realize_verb(row, task)
+        return "verb", task.__dict__, sol
+
+    sub = df[df["pos"].str.upper().eq("NOUN")]
+    if sub.empty:
+        st.stop()
+    row = sub.sample(1).iloc[0]
+    case = random.choice(noun_modes)
+    ud_key = make_ud_key_for_noun(case)
+    task = NounTask(
+        lemma=str(row["lemma"]),
+        gloss=str(row["english"]),
+        case=case,
+        ud_key=ud_key
+    )
+    sol = realize_noun(row, task)
+    return "noun", task.__dict__, sol
+
+# ------------------------- REALIZATION (INFLECTION) -------------------------
+
+def realize_from_overrides(row, ud_key: str) -> Optional[str]:
+    return lookup_override(row.get("forms", None), ud_key)
+
+def realize_verb(row, task: VerbTask) -> str:
+    # Priority 1: explicit CSV overrides
+    override = realize_from_overrides(row, task.ud_key)
+    if override:
+        return override
+
+    # Priority 2: NYTK mT5 generator, if chosen
+    if "ML generator" in prefer_ml and _TRANSFORMERS_OK:
+        gen = nyt_generate(task.lemma, task.ud_key)
+        if gen:
+            return gen
+
+    # Priority 3: rule engine fallback
+    if task.definite:
+        return HuRules.present_def(task.lemma, task.person, task.number)
+    return HuRules.present_indef(task.lemma, task.person, task.number, task.is_ik)
+
+def realize_noun(row, task: NounTask) -> str:
+    override = realize_from_overrides(row, task.ud_key)
+    if override:
+        return override
+
+    if "ML generator" in prefer_ml and _TRANSFORMERS_OK:
+        gen = nyt_generate(task.lemma, task.ud_key)
+        if gen:
+            return gen
+
+    if task.case == "Inessive":
+        return HuRules.inessive(task.lemma)
+    return HuRules.adessive(task.lemma)
+
+# ------------------------- SESSION STATE -------------------------
+
+if "df" not in st.session_state:
+    st.session_state.df = None
+if df is not None:
+    ok, msg = validate_corpus(df)
     if ok:
-        st.toast("Correct!", icon="✅")
-        fb.markdown(f'<span class="feedback ok">Correct: {gold}</span>', unsafe_allow_html=True)
+        st.session_state.df = df.copy()
     else:
-        st.toast("Not quite", icon="❌")
-        fb.markdown(f'<span class="feedback bad">Expected: {gold}</span>', unsafe_allow_html=True)
+        st.error(msg)
 
-# ----------------------------
-# Events
-# ----------------------------
-if check:
-    try:
-        gold = generate_one(st.session_state.current["lemma"], st.session_state.current["pos"], st.session_state.current["tag"])
-    except Exception as e:
-        st.exception(e)
-        st.stop()
-    st.session_state.seen += 1
-    if answers_equal(user, gold, strict_accents):
-        st.session_state.score += 1
-        show_feedback(True, gold)
-        st.session_state.idx += 1
-        next_question()
-    else:
-        show_feedback(False, gold)
+if "score" not in st.session_state:
+    st.session_state.score = 0
+if "total" not in st.session_state:
+    st.session_state.total = 0
+if "current" not in st.session_state:
+    st.session_state.current = None
+if "solution" not in st.session_state:
+    st.session_state.solution = ""
+if "kind" not in st.session_state:
+    st.session_state.kind = ""
+if "feedback" not in st.session_state:
+    st.session_state.feedback = ""
 
-if reveal:
-    try:
-        gold = generate_one(st.session_state.current["lemma"], st.session_state.current["pos"], st.session_state.current["tag"])
-    except Exception as e:
-        st.exception(e)
-        st.stop()
-    show_feedback(False, gold)
-    st.session_state.idx += 1
-    next_question()
+def new_question():
+    st.session_state.feedback = ""
+    if st.session_state.df is None:
+        st.warning("Upload or load a corpus CSV to begin.")
+        return
+    kind, payload, solution = next_task(st.session_state.df)
+    st.session_state.kind = kind
+    st.session_state.current = payload
+    st.session_state.solution = solution
 
-if nxt:
-    st.session_state.idx += 1
-    next_question()
-    fb.empty()
+# ------------------------- MAIN INTERACTION -------------------------
 
-# footer
-st.write(f"Score: {st.session_state.score} / {st.session_state.seen}")
-st.progress(0 if st.session_state.seen == 0 else min(1.0, st.session_state.score / max(1, st.session_state.seen)))
-st.caption("Answers are generated with the emMorph tagset using NYTK’s Hungarian morphological generator on Hugging Face.")
+colL, colR = st.columns([2, 1])
+
+with colL:
+    if st.session_state.current is None and st.session_state.df is not None:
+        new_question()
+    elif st.session_state.df is None:
+        st.info("Use the sidebar to upload your corpus or load it from GitHub, then click New Question.")
+
+    if st.button("New Question", use_container_width=True):
+        new_question()
+
+    if st.session_state.current:
+        c = st.session_state.current
+        if st.session_state.kind == "verb":
+            pron = PRONOUNS_HU[(c["number"], c["person"])] if show_hu_pronouns else ""
+            conj = "definite present" if c["definite"] else "indefinite present"
+            aux = f"Tense and pronoun: present, {pron or f'person {c['person']}, {c['number']}'.capitalize()}"
+            st.markdown(
+                f"""
+                <div class="prompt-card">
+                  <div><span class="pill">Verb</span><span class="pill">{conj}</span></div>
+                  <div class="mono" style="font-size:1.25rem;margin-top:.25rem;"><b>{c["lemma"]}</b></div>
+                  <div class="muted">Meaning: {c["gloss"]}</div>
+                  <div class="muted">{aux}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+        else:
+            case_name = "inessive" if c["case"] == "Inessive" else "adessive"
+            st.markdown(
+                f"""
+                <div class="prompt-card">
+                  <div><span class="pill">Noun</span><span class="pill">{case_name}</span></div>
+                  <div class="mono" style="font-size:1.25rem;margin-top:.25rem;"><b>{c["lemma"]}</b></div>
+                  <div class="muted">Meaning: {c["gloss"]}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+        answer = st.text_input("Type the correct form")
+        colA, colB, colC = st.columns([1, 1, 1])
+        with colA:
+            if st.button("Check"):
+                user = normalize_answer(answer, ignore_accents)
+                gold = normalize_answer(st.session_state.solution, ignore_accents)
+                st.session_state.total += 1
+                if user == gold and len(gold) > 0:
+                    st.session_state.score += 1
+                    st.session_state.feedback = f"<span class='good'>Correct.</span> {st.session_state.solution}"
+                else:
+                    st.session_state.feedback = f"<span class='bad'>Not quite.</span> Expected: <b>{st.session_state.solution}</b>"
+        with colB:
+            if allow_reveal and st.button("Reveal"):
+                st.session_state.feedback = f"Answer: <b>{st.session_state.solution}</b>"
+        with colC:
+            if st.button("Next"):
+                new_question()
+
+        if st.session_state.feedback:
+            st.markdown(st.session_state.feedback, unsafe_allow_html=True)
+
+with colR:
+    acc = st.session_state.score
+    tot = st.session_state.total
+    rate = f"{(100 * acc / tot):.0f}%" if tot else "—"
+    st.metric(label="Accuracy", value=rate, delta=f"{acc}/{tot} correct" if tot else "")
+
+    if st.session_state.df is not None:
+        st.caption("Corpus loaded and cached for quick sampling.")
+
+# ------------------------- FOOTER AND REFERENCES -------------------------
+
+st.caption(
+    "Suffix choices for -ban/-ben and -nál/-nél follow Hungarian vowel harmony and standard case rules. "
+    "Definite and indefinite present endings follow standard paradigms with special treatment for -ik verbs. "
+    "For maximum accuracy, provide explicit forms in the CSV or enable the NYTK mT5 morphological generator in Advanced settings."
+)
+
