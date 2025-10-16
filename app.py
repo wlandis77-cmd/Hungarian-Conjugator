@@ -5,14 +5,16 @@ import io
 import random
 import unicodedata
 import streamlit as st
+from typing import List, Tuple
 
 # ----------------------------
-# Hugging Face cache locations
+# Stable, private Hugging Face cache
 # ----------------------------
-# These help Streamlit Cloud keep the model between runs.
-os.environ.setdefault("TRANSFORMERS_CACHE", "/mount/data/transformers")
-os.environ.setdefault("HF_HOME", "/mount/data/hf_home")
-os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+# Use a user-owned cache (no /mount/data) to avoid PermissionError/locks.
+HF_CACHE = os.path.expanduser("~/.cache/hf_hu_morph")
+os.makedirs(HF_CACHE, exist_ok=True)
+
+MODEL_ID = "NYTK/morphological-generator-emmorph-mt5-hungarian"
 
 # ----------------------------
 # Page and theme
@@ -22,33 +24,31 @@ st.markdown("""
 <style>
 :root{
   --navy:#0a2540;
-  --cream:#fff6e6;
-  --ink:#0d1b2a;
-  --muted:#5b6b83;
+  --navy-2:#0d335a;
+  --cream:#fff5e1;
+  --ink:#0b1d33;
+  --muted:#c9d2e3;
   --ok:#16a34a;
   --bad:#dc2626;
-  --chip:#e8eef7;
 }
 html, body, [class*="css"]{font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;}
-body{background: var(--cream);}
+body{background: var(--navy);}
 .block-container{padding-top:1.0rem; padding-bottom:1.25rem;}
 
-h1,h2,h3{color:var(--navy);}
-
-/* primary button with motion */
-.stButton>button[kind="primary"]{
-  background: linear-gradient(135deg, #0a2540, #1f6f8b);
-  border:0; color:#fff; padding:.62rem 1.1rem; border-radius:12px;
-  box-shadow:0 6px 18px rgba(10,37,64,.25);
-  transition:transform .08s ease-out, box-shadow .15s ease;
+/* main content */
+h1,h2,h3, .stMarkdown, .stTextInput>div>div>input, .stCaption, .stText{color:#0a2540;}
+/* center card on cream so text stays legible on a dark page */
+.card{
+  background: var(--cream);
+  border-radius:18px;
+  padding:1.0rem 1.1rem .9rem 1.1rem;
+  box-shadow:0 10px 28px rgba(0,0,0,.28);
 }
-.stButton>button[kind="primary"]:hover{ transform: translateY(-1px); }
-.stButton>button:not([kind="primary"]){
-  background:#fff; border:1px solid #e6eaf0; color:#0a2540;
-  padding:.55rem 1rem; border-radius:12px;
-}
+.header-wrap{ text-align:center; margin-bottom:.6rem;}
+.header-title{ color:#355784; font-size:.95rem; }
+.header-lemma{ color:#0a2540; font-size:1.9rem; font-weight:800; }
+.underline{height:2px; width:78%; background:#0a2540; opacity:.25; margin:.6rem auto .5rem auto; border-radius:2px;}
 
-/* prompt chip */
 .prompt-chip{
   display:inline-block; background:#eaf0ff; color:#0a2540;
   padding:.5rem .8rem; border-radius:12px; font-weight:700;
@@ -56,25 +56,41 @@ h1,h2,h3{color:var(--navy);}
 .case-chip{ background:#fff0da; }
 .verb-chip{ background:#e6f5ff; }
 
+/* buttons */
+.stButton>button[kind="primary"]{
+  background: linear-gradient(135deg, var(--navy), var(--navy-2));
+  border:0; color:#fff; padding:.62rem 1.1rem; border-radius:12px;
+  box-shadow:0 6px 18px rgba(0,0,0,.35);
+  transition:transform .08s ease-out, box-shadow .15s ease;
+}
+.stButton>button[kind="primary"]:hover{ transform: translateY(-1px); }
+
+.stButton>button:not([kind="primary"]){
+  background:#fff; color:#0a2540; border:1px solid #e6eaf0; border-radius:12px; padding:.55rem 1rem;
+}
+
 /* feedback pills */
 .feedback{ display:inline-block; padding:.52rem .9rem; border-radius:999px; font-weight:700;}
 .feedback.ok{ background:var(--ok); color:#fff;}
 .feedback.bad{ background:var(--bad); color:#fff;}
 
-/* card shell */
-.card{
-  background:#fff;
-  border-radius:18px;
-  padding:1.0rem 1.1rem .9rem 1.1rem;
-  box-shadow:0 10px 28px rgba(10,37,64,.08);
-}
-.header-wrap{ text-align:center; margin-bottom:.6rem;}
-.header-title{ color:var(--muted); font-size:.95rem; }
-.header-lemma{ color:var(--navy); font-size:1.9rem; font-weight:800; }
-.underline{height:2px; width:78%; background:#0a2540; opacity:.2; margin:.6rem auto .5rem auto; border-radius:2px;}
-
-/* input shaping */
+/* inputs */
 input[type="text"]{ border-radius:12px !important; }
+
+/* sidebar theming */
+[data-testid="stSidebar"]{
+  background: var(--navy);
+}
+[data-testid="stSidebar"] *{
+  color: #f6f7fb !important;
+}
+[data-testid="stSidebar"] .stButton>button{
+  background:#133a66; color:#fff; border:1px solid rgba(255,255,255,.15);
+}
+[data-testid="stSidebar"] .stRadio > label, 
+[data-testid="stSidebar"] .stCheckbox > label{
+  color:#f6f7fb !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -96,36 +112,45 @@ def answers_equal(a: str, b: str, strict_accents: bool) -> bool:
     return strip_diacritics(a) == strip_diacritics(b)
 
 # ----------------------------
-# Model loader and generator
+# Model download and pipeline
 # ----------------------------
 @st.cache_resource(show_spinner=False)
-def load_generator():
-    # model requires sentencepiece
+def prefetch_model() -> str:
+    """
+    Download the model once into a private, user-writable cache and return the local path.
+    """
     try:
-        import sentencepiece  # noqa: F401
+        from huggingface_hub import snapshot_download
+        local_dir = snapshot_download(repo_id=MODEL_ID, cache_dir=HF_CACHE, resume_download=True)
+        return local_dir
+    except Exception as e:
+        # If this fails, bubble up so the UI can show a clear message instead of crashing
+        raise RuntimeError(f"Model download failed: {e}")
+
+@st.cache_resource(show_spinner=False)
+def load_generator():
+    try:
+        import sentencepiece  # required by mT5 tokenizer
     except Exception:
         st.error("Missing dependency: sentencepiece. Add `sentencepiece>=0.1.99` to requirements.txt and redeploy.")
         st.stop()
 
     from transformers import pipeline
-    # device_map="auto" chooses CPU on Streamlit Cloud
-    return pipeline(
-        task="text2text-generation",
-        model="NYTK/morphological-generator-emmorph-mt5-hungarian",
-        device_map="auto"
-    )
-
-def build_prompt(lemma: str, pos_code: str, tag: str) -> str:
-    # Store pos_code as "/N" or "/V" without brackets, add exactly one bracketed POS here.
-    pos = pos_code.strip()
-    if pos.startswith("[") and pos.endswith("]"):
-        pos = pos[1:-1]
-    return f"morph: {lemma} [{pos}]{tag}"
+    local_model = prefetch_model()
+    # Build pipeline from the downloaded snapshot to avoid any hub writes during runtime
+    return pipeline(task="text2text-generation", model=local_model, device_map="auto")
 
 @st.cache_data(show_spinner=False)
 def generate_one(lemma: str, pos_code: str, tag: str) -> str:
+    """
+    Generate one surface form using the emMorph tags.
+    """
     gen = load_generator()
-    out = gen(build_prompt(lemma, pos_code, tag), max_new_tokens=8)[0]["generated_text"]
+    pos = pos_code.strip()
+    if pos.startswith("[") and pos.endswith("]"):
+        pos = pos[1:-1]
+    prompt = f"morph: {lemma} [{pos}]{tag}"
+    out = gen(prompt, max_new_tokens=8)[0]["generated_text"]
     return out.strip()
 
 # ----------------------------
@@ -143,19 +168,20 @@ with st.sidebar:
         opt_ade = st.checkbox("Adessive", value=True, help="Noun case: -nál / -nél")
         opt_prs_def = st.checkbox("Present definite", value=False)
 
-    strict_accents = st.toggle("Require accents for answers", value=False, help="Turn on to require correct diacritics.")
-    warm = st.button("Initialize model now", help="Loads the generator so the first check is instant.")
-    if warm:
-        _ = load_generator()
-        st.success("Model ready.")
+    strict_accents = st.toggle("Require accents for answers", value=False)
+
+    if st.button("Preload model"):
+        with st.spinner("Downloading and initializing the morphology model…"):
+            _ = load_generator()
+        st.success("Model cached and ready.")
 
     st.divider()
     st.subheader("Lemmas")
     source = st.radio("Choose your list", ["Sample list", "Upload CSVs"])
     nouns_file = verbs_file = None
     if source == "Upload CSVs":
-        with st.popover("How to format CSVs"):
-            st.write("Upload two CSV files with a header named `lemma` and one lemma per row, UTF‑8 encoded.")
+        with st.popover("CSV format"):
+            st.write("Each file must have a header named `lemma` and one lemma per line in UTF‑8.")
             st.code("lemma\nház\nkönyv\nember\n", language="text")
             st.code("lemma\nlát\nír\nszeret\n", language="text")
         nouns_file = st.file_uploader("Upload nouns.csv", type=["csv"])
@@ -167,43 +193,41 @@ with st.sidebar:
 SAMPLE_NOUNS = ["ház","ablak","asztal","könyv","ember","város","kert","kút","madár","téma"]
 SAMPLE_VERBS = ["lát","ír","olvas","mond","mos","tör","tanul","szeret","ad","vesz"]
 
-def read_lemmas(upload) -> list[str]:
+def read_lemmas(upload) -> List[str]:
     text = upload.getvalue().decode("utf-8")
-    # Try DictReader first for header "lemma"
     try:
         rows = list(csv.DictReader(io.StringIO(text)))
         if rows and "lemma" in rows[0]:
             return [normalize(r["lemma"]) for r in rows if r.get("lemma")]
     except Exception:
         pass
-    # Fallback: first column
     return [normalize(r[0]) for r in csv.reader(io.StringIO(text)) if r]
 
-def load_lemma_pools():
+def load_lemma_pools() -> Tuple[List[str], List[str]]:
     nouns = SAMPLE_NOUNS[:]
     verbs = SAMPLE_VERBS[:]
     if nouns_file is not None:
         try:
             nouns = read_lemmas(nouns_file)
         except Exception:
-            st.error("Could not read nouns.csv. Ensure it has a 'lemma' header and UTF‑8 encoding.")
+            st.error("Could not read nouns.csv. Make sure it has a 'lemma' header and UTF‑8 encoding.")
     if verbs_file is not None:
         try:
             verbs = read_lemmas(verbs_file)
         except Exception:
-            st.error("Could not read verbs.csv. Ensure it has a 'lemma' header and UTF‑8 encoding.")
+            st.error("Could not read verbs.csv. Make sure it has a 'lemma' header and UTF‑8 encoding.")
     return sorted(set(nouns)), sorted(set(verbs))
 
 nouns, verbs = load_lemma_pools()
 
 # ----------------------------
-# Tag pools using emMorph codes
+# emMorph tag pools
 # ----------------------------
-NOUN_TAGS: list[tuple[str, str, str]] = []
+NOUN_TAGS: List[Tuple[str, str, str]] = []
 if opt_ine: NOUN_TAGS.append(("/N", "[Ine]", "Inessive"))
 if opt_ade: NOUN_TAGS.append(("/N", "[Ade]", "Adessive"))
 
-VERB_TAGS: list[tuple[str, str, str]] = []
+VERB_TAGS: List[Tuple[str, str, str]] = []
 if opt_prs_indef:
     for p in ["1Sg","2Sg","3Sg","1Pl","2Pl","3Pl"]:
         VERB_TAGS.append(("/V", f"[Prs.NDef.{p}]", f"Present indefinite · {PRONOUNS[p]}"))
@@ -253,7 +277,9 @@ def next_question():
         sublabel = "Case practice"
     st.session_state.current = dict(kind=kind, lemma=lemma, pos=pos, tag=tag, pretty=pretty, chip_class=chip_class, sublabel=sublabel)
 
-# controls row
+# ----------------------------
+# Build UI
+# ----------------------------
 c1, c2, c3 = st.columns(3)
 with c1:
     if st.button("Build or reset pool"):
@@ -273,9 +299,6 @@ with c3:
 if st.session_state.current is None:
     next_question()
 
-# ----------------------------
-# Card UI
-# ----------------------------
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.markdown(f"""
 <div class="header-wrap">
@@ -288,16 +311,15 @@ st.markdown('<div class="underline"></div>', unsafe_allow_html=True)
 st.write("Type the correct form for:")
 st.markdown(f'<span class="prompt-chip {st.session_state.current["chip_class"]}">{st.session_state.current["pretty"]}</span>', unsafe_allow_html=True)
 st.caption(st.session_state.current["sublabel"])
-st.markdown('</div>', unsafe_allow_html=True)  # end card
+st.markdown('</div>', unsafe_allow_html=True)
 
-# answer row
 user = st.text_input("Your answer", value="", placeholder="type here, then Check")
-col1, col2, col3 = st.columns([1,1,1])
-with col1:
+b1, b2, b3 = st.columns([1,1,1])
+with b1:
     check = st.button("Check", type="primary")
-with col2:
+with b2:
     reveal = st.button("Show answer")
-with col3:
+with b3:
     nxt = st.button("Next")
 
 fb = st.empty()
@@ -317,7 +339,7 @@ if check:
     try:
         gold = generate_one(st.session_state.current["lemma"], st.session_state.current["pos"], st.session_state.current["tag"])
     except Exception as e:
-        st.exception(e)
+        st.error(str(e))
         st.stop()
     st.session_state.seen += 1
     if answers_equal(user, gold, strict_accents):
@@ -332,7 +354,7 @@ if reveal:
     try:
         gold = generate_one(st.session_state.current["lemma"], st.session_state.current["pos"], st.session_state.current["tag"])
     except Exception as e:
-        st.exception(e)
+        st.error(str(e))
         st.stop()
     show_feedback(False, gold)
     st.session_state.idx += 1
@@ -343,7 +365,6 @@ if nxt:
     next_question()
     fb.empty()
 
-# footer
 st.write(f"Score: {st.session_state.score} / {st.session_state.seen}")
 st.progress(0 if st.session_state.seen == 0 else min(1.0, st.session_state.score / max(1, st.session_state.seen)))
 st.caption("Answers are generated with the emMorph tagset using NYTK’s Hungarian morphological generator on Hugging Face.")
