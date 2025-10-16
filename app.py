@@ -1,7 +1,8 @@
 # app.py
 # Hungarian Conjugation and Declension Practice
-# Python 3.12 • Streamlit app with optional GitHub-backed corpus loading,
-# pastel UI, simplified navigation without "Next", and AI text-to-speech for Hungarian.
+# Python 3.12 • Streamlit app with GitHub corpus loading,
+# pastel UI, single-button navigation, AI TTS, and 11 noun cases:
+# Nom, Acc, Dat, Ine, Sup, Ade, Ill, Sub, All, Ins, Gen
 
 from __future__ import annotations
 
@@ -75,7 +76,6 @@ st.markdown(
       --good:#1c8c4e;
       --bad:#b21b1b;
     }
-
     [data-testid="stAppViewContainer"]{
       background: linear-gradient(135deg,var(--bg1) 0%,var(--bg2) 100%);
     }
@@ -83,15 +83,9 @@ st.markdown(
       background: linear-gradient(180deg,#f8eaff 0%,#e6f7ff 100%);
       border-right: 1px solid var(--border);
     }
-    [data-testid="stHeader"]{
-      background: transparent;
-    }
+    [data-testid="stHeader"]{ background: transparent; }
+    .block-container{ padding-top: 1rem; }
 
-    .block-container{
-      padding-top: 1rem;
-    }
-
-    /* Cards and chips */
     .prompt-card{
       border: 1px solid var(--border);
       padding: 1rem 1.25rem;
@@ -112,7 +106,6 @@ st.markdown(
     .big-title{ font-size: 1.8rem; font-weight: 700; letter-spacing: .2px; margin-bottom: .25rem; color:var(--ink); }
     .subtitle{ color: var(--muted); margin-bottom: 1rem; }
 
-    /* Buttons */
     .stButton > button{
       background: var(--accent) !important;
       color: var(--accent-ink) !important;
@@ -126,21 +119,17 @@ st.markdown(
       transition: transform .08s ease;
     }
 
-    /* Inputs */
     input, textarea, select{
       background-color: var(--surface) !important;
       color: var(--ink) !important;
       border: 1px solid var(--border) !important;
     }
-    .stTextInput > div > div > input{
-      background-color: var(--surface) !important;
-    }
+    .stTextInput > div > div > input{ background-color: var(--surface) !important; }
     .stSelectbox div[role="combobox"]{
       background-color: var(--surface) !important;
       border: 1px solid var(--border) !important;
     }
 
-    /* Metrics */
     .metric-card{
       background: var(--surface2);
       border: 1px solid var(--border);
@@ -172,7 +161,6 @@ class VerbTask:
     number: str
     is_ik: bool
     ud_key: str
-
 
 @dataclass(frozen=True)
 class NounTask:
@@ -243,11 +231,17 @@ with st.sidebar:
     )
 
     st.caption("Noun modes")
+    NOUN_CASE_OPTIONS = [
+        "Nominative", "Accusative", "Dative",
+        "Inessive", "Superessive", "Adessive",
+        "Illative", "Sublative", "Allative",
+        "Instrumental", "Genitive"
+    ]
     noun_modes = st.multiselect(
         "Cases",
-        options=["Inessive", "Adessive"],
-        default=["Inessive", "Adessive"],
-        help="Inessive is -ban/-ben. Adessive is -nál/-nél."
+        options=NOUN_CASE_OPTIONS,
+        default=["Accusative", "Dative", "Inessive", "Superessive", "Adessive", "Illative", "Sublative", "Allative", "Instrumental"],
+        help="Practice the most common cases; Genitive here is the possessive -é form."
     )
 
     st.divider()
@@ -274,12 +268,9 @@ with st.sidebar:
             "For Google Cloud, add a service account JSON to Streamlit secrets as GOOGLE_TTS_SERVICE_ACCOUNT_JSON. "
             "Hungarian language code is hu-HU."
         )
-
-        # Quick sanity test
         if st.button("Test TTS with “Szia!”"):
             audio = None
             try:
-                audio = None
                 if tts_provider.startswith("gTTS"):
                     if not _HAS_GTTS:
                         st.error("gTTS is not installed. Run: pip install gTTS")
@@ -313,8 +304,7 @@ CSV_TEMPLATE = """
 pos,lemma,english,is_ik,forms
 VERB,kér,to ask,False,"{""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=1|Number=Sing|Definite=Ind"": ""kérek"", ""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=3|Number=Plur|Definite=Def"": ""kérik""}"
 VERB,dolgozik,to work,True,"{""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=1|Number=Sing|Definite=Ind"": ""dolgozom"", ""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=3|Number=Sing|Definite=Ind"": ""dolgozik""}"
-NOUN,iroda,office,, "{""NOUN Case=Ine|Number=Sing"": ""irodában"", ""NOUN Case=Ade|Number=Sing"": ""irodánál""}"
-NOUN,bolt,shop,, "{""NOUN Case=Ine|Number=Sing"": ""boltban"", ""NOUN Case=Ade|Number=Sing"": ""boltnál""}"
+NOUN,bolt,shop,, "{""NOUN Case=Ine|Number=Sing"": ""boltban"", ""NOUN Case=Ade|Number=Sing"": ""boltnál"", ""NOUN Case=Ill|Number=Sing"": ""boltba"", ""NOUN Case=Sub|Number=Sing"": ""boltra"", ""NOUN Case=All|Number=Sing"": ""bolthoz"", ""NOUN Case=Sup|Number=Sing"": ""bolton"", ""NOUN Case=Dat|Number=Sing"": ""boltnak"", ""NOUN Case=Ins|Number=Sing"": ""bolttal"", ""NOUN Case=Acc|Number=Sing"": ""boltot"", ""NOUN Case=Gen|Number=Sing"": ""bolté""}"
 """.strip()
 
 with st.sidebar:
@@ -334,12 +324,12 @@ def has_back(s: str) -> bool:
 def has_front_rounded(s: str) -> bool:
     return any(ch in FRONT_R for ch in s)
 
-def last_vowel_group(s: str) -> str:
+def last_vowel(s: str) -> Optional[str]:
     last = None
     for ch in s.lower():
         if ch in ALL_VOWELS:
             last = ch
-    return last or "a"
+    return last
 
 def harmony_set(s: str) -> str:
     if has_back(s):
@@ -362,19 +352,99 @@ def normalize_answer(s: str, strip_accents: bool) -> str:
     return s.lower()
 
 
-# ------------------------- RULE ENGINE (TARGETED) -------------------------
+# ------------------------- RULE ENGINE (EXPANDED NOUN CASES) -------------------------
 
 class HuRules:
+    """Targeted fallback rules for common cases. The ML generator or CSV overrides remain the primary accuracy path."""
+
+    # Baseline cases
+    @staticmethod
+    def nominative(noun: str) -> str:
+        return noun
+
+    @staticmethod
+    def dative(noun: str) -> str:
+        return noun + ("nak" if harmony_set(noun) == "back" else "nek")
+
     @staticmethod
     def inessive(noun: str) -> str:
+        return noun + ("ban" if harmony_set(noun) == "back" else "ben")
+
+    @staticmethod
+    def superessive(noun: str) -> str:
+        # Many vowel-final nouns prefer plain -n (autón). Otherwise -on/-en/-ön by harmony.
+        if noun[-1].lower() in ALL_VOWELS:
+            return noun + "n"
         h = harmony_set(noun)
-        return noun + ("ban" if h == "back" else "ben")
+        return noun + ("on" if h == "back" else "ön" if h == "front_r" else "en")
 
     @staticmethod
     def adessive(noun: str) -> str:
-        h = harmony_set(noun)
-        return noun + ("nál" if h == "back" else "nél")
+        return noun + ("nál" if harmony_set(noun) == "back" else "nél")
 
+    @staticmethod
+    def illative(noun: str) -> str:
+        return noun + ("ba" if harmony_set(noun) == "back" else "be")
+
+    @staticmethod
+    def sublative(noun: str) -> str:
+        return noun + ("ra" if harmony_set(noun) == "back" else "re")
+
+    @staticmethod
+    def allative(noun: str) -> str:
+        h = harmony_set(noun)
+        return noun + ("hoz" if h == "back" else "höz" if h == "front_r" else "hez")
+
+    @staticmethod
+    def instrumental(noun: str) -> str:
+        # -val/-vel with v-assimilation and gemination after consonant stems
+        if noun[-1].lower() in ALL_VOWELS:
+            return noun + ("val" if harmony_set(noun) == "back" else "vel")
+        # Consonant-final: drop v and double final consonant, choose -al/-el by harmony
+        ending = "al" if harmony_set(noun) == "back" else "el"
+        last_char = noun[-1]
+        # Handle digraphs like sz, zs, cs, gy, ny, ty, ly by doubling logically
+        if noun.endswith(("sz","zs","cs","gy","ny","ty","ly")):
+            return noun + noun[-2:] + ending
+        return noun + last_char + ending
+
+    @staticmethod
+    def genitive(noun: str) -> str:
+        # Practical learner-friendly "possessive -é" form, with a/e lengthening
+        if noun.endswith("a"):
+            return noun[:-1] + "á" + "é"
+        if noun.endswith("e"):
+            return noun[:-1] + "é" + "é"
+        return noun + "é"
+
+    @staticmethod
+    def accusative(noun: str) -> str:
+        # Heuristic:
+        # 1) a/e at word end lengthen + t
+        if noun.endswith("a"):
+            return noun[:-1] + "á" + "t"
+        if noun.endswith("e"):
+            return noun[:-1] + "é" + "t"
+        # 2) other vowel-final: +t
+        if noun[-1].lower() in ALL_VOWELS:
+            return noun + "t"
+        # 3) consonant-final: choose between bare -t and a linking vowel + t
+        # Use linking vowel with final d/t or sibilants, and often with hard clusters
+        last = noun[-1].lower()
+        fin_bigram = noun[-2:].lower() if len(noun) >= 2 else ""
+        sibilant_like = last in {"s","z","c"} or fin_bigram in {"sz","zs","cs","dz","dzs"}
+        dental_like = last in {"t","d"}
+        use_link = dental_like or sibilant_like
+        # Pick a linking vowel. Prefer 'a' after last a/á, 'e' after e/é, else by harmony.
+        lv = "a" if last_vowel(noun) in {"a","á"} else "e" if last_vowel(noun) in {"e","é"} else (
+            "o" if harmony_set(noun) == "back" else "ö" if harmony_set(noun) == "front_r" else "e"
+        )
+        if use_link:
+            return noun + lv + "t"
+        # Otherwise many polysyllabic consonant-final nouns accept bare -t
+        return noun + "t"
+
+    # Verb helpers from earlier app
     @staticmethod
     def is_ik(lemma: str, csv_flag: Optional[bool]) -> bool:
         if csv_flag is True:
@@ -423,7 +493,6 @@ class HuRules:
         v_2pl_cons = {"back": "játok", "front_unr": "itek", "front_r": "itek"}[h]
         v_2pl_vow = {"back": "játok", "front_unr": "jétek", "front_r": "jétek"}[h]
         v_3pl_default = {"back": "ják", "front_unr": "ik", "front_r": "ik"}[h]
-
         ends_vowel = lemma[-1].lower() in ALL_VOWELS
 
         if number == "Sing" and person == 1:
@@ -527,13 +596,27 @@ PRONOUNS_HU = {
     ("Plur", 3): "ők",
 }
 
+CASE_TO_UD = {
+    "Nominative": "Nom",
+    "Accusative": "Acc",
+    "Dative": "Dat",
+    "Inessive": "Ine",
+    "Superessive": "Sup",
+    "Adessive": "Ade",
+    "Illative": "Ill",
+    "Sublative": "Sub",
+    "Allative": "All",
+    "Instrumental": "Ins",
+    "Genitive": "Gen",
+}
+
 def make_ud_key_for_verb(definite: bool, person: int, number: str) -> str:
     dval = "Def" if definite else "Ind"
     return f"VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person={person}|Number={'Sing' if number=='Sing' else 'Plur'}|Definite={dval}"
 
 def make_ud_key_for_noun(case: str) -> str:
-    c = "Ine" if case == "Inessive" else "Ade"
-    return f"NOUN Case={c}|Number=Sing"
+    case_code = CASE_TO_UD[case]
+    return f"NOUN Case={case_code}|Number=Sing"
 
 def choose_person_number() -> Tuple[int, str]:
     person = random.choice([1, 2, 3])
@@ -613,9 +696,31 @@ def realize_noun(row, task: NounTask) -> str:
         gen = nyt_generate(task.lemma, task.ud_key)
         if gen:
             return gen
-    if task.case == "Inessive":
+    # Fallback rules per case
+    c = task.case
+    if c == "Nominative":
+        return HuRules.nominative(task.lemma)
+    if c == "Accusative":
+        return HuRules.accusative(task.lemma)
+    if c == "Dative":
+        return HuRules.dative(task.lemma)
+    if c == "Inessive":
         return HuRules.inessive(task.lemma)
-    return HuRules.adessive(task.lemma)
+    if c == "Superessive":
+        return HuRules.superessive(task.lemma)
+    if c == "Adessive":
+        return HuRules.adessive(task.lemma)
+    if c == "Illative":
+        return HuRules.illative(task.lemma)
+    if c == "Sublative":
+        return HuRules.sublative(task.lemma)
+    if c == "Allative":
+        return HuRules.allative(task.lemma)
+    if c == "Instrumental":
+        return HuRules.instrumental(task.lemma)
+    if c == "Genitive":
+        return HuRules.genitive(task.lemma)
+    return task.lemma
 
 
 # ------------------------- SESSION STATE -------------------------
@@ -698,11 +803,9 @@ with colL:
     elif st.session_state.df is None:
         st.info("Use the sidebar to upload your corpus or load it from GitHub, then click New Question.")
 
-    # Single navigation control: New Question
     if st.button("New Question", use_container_width=True):
         new_question()
 
-    # Prompt and answer
     if st.session_state.current:
         c = st.session_state.current
         if st.session_state.kind == "verb":
@@ -721,11 +824,10 @@ with colL:
                 unsafe_allow_html=True
             )
         else:
-            case_name = "inessive" if c["case"] == "Inessive" else "adessive"
             st.markdown(
                 f"""
                 <div class="prompt-card">
-                  <div><span class="pill">Noun</span><span class="pill">{case_name}</span></div>
+                  <div><span class="pill">Noun</span><span class="pill">{c["case"]}</span></div>
                   <div class="mono" style="font-size:1.25rem;margin-top:.25rem;"><b>{c["lemma"]}</b></div>
                   <div class="muted">Meaning: {c["gloss"]}</div>
                 </div>
@@ -733,12 +835,10 @@ with colL:
                 unsafe_allow_html=True
             )
 
-        # Optional TTS for the prompt itself
         colT1, colT2 = st.columns([1, 1])
         with colT1:
             if st.button("🔊 Speak prompt"):
-                text = c["lemma"]
-                audio = tts_speak_hu(text, tts_rate)
+                audio = tts_speak_hu(c["lemma"], tts_rate)
                 if audio:
                     st.session_state.tts_last_audio = audio
         with colT2:
@@ -792,14 +892,10 @@ with colR:
         """,
         unsafe_allow_html=True
     )
-
     if st.session_state.df is not None:
         st.caption("Corpus loaded and cached for quick sampling.")
 
-
-# ------------------------- FOOTER -------------------------
-
 st.caption(
-    "Suffix choices for -ban/-ben and -nál/-nél follow standard harmony rules. "
-    "Present tense forms use CSV overrides when available, then the neural generator if enabled, then rules."
+    "Noun cases supported: Nominative, Accusative, Dative, Inessive, Superessive, Adessive, Illative, Sublative, Allative, Instrumental, and Genitive as the -é possessive form. "
+    "For highest accuracy, provide forms in your CSV or enable the neural generator; otherwise fast fallback rules apply."
 )
