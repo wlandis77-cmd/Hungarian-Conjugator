@@ -6,12 +6,11 @@ import unicodedata
 import streamlit as st
 
 # --------------
-# Styling
+# Page + styling
 # --------------
 st.set_page_config(page_title="Hungarian Morphology Trainer", page_icon="🇭🇺", layout="centered")
 st.markdown("""
 <style>
-/* Global font + background */
 html, body, [class*="css"]  {
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
 }
@@ -33,7 +32,6 @@ html, body, [class*="css"]  {
   transform: translateY(0);
   box-shadow: 0 3px 8px rgba(0,0,0,.18);
 }
-
 /* Secondary buttons */
 .stButton>button:not([kind="primary"]){
   background: #ffffff;
@@ -46,18 +44,16 @@ html, body, [class*="css"]  {
   background: #f7f9fc;
   transform: translateY(-1px);
 }
-
-/* Feedback "buttons" */
+/* Feedback pills */
 .feedback{
   display:inline-block;
-  padding: .55rem .9rem;
+  padding:.55rem .9rem;
   border-radius: 999px;
-  font-weight: 600;
-  border: 0;
+  font-weight:600;
+  border:0;
 }
-.feedback.ok{ background: #14b87a; color: white; }
-.feedback.bad{ background: #f04444; color: white; }
-
+.feedback.ok{ background:#14b87a; color:white; }
+.feedback.bad{ background:#f04444; color:white; }
 /* Prompt chip */
 .prompt-chip{
   display:inline-block;
@@ -67,17 +63,10 @@ html, body, [class*="css"]  {
   border-radius:12px;
   font-weight:600;
 }
-.case-chip{
-  background:#fff7ed;
-}
-.verb-chip{
-  background:#ecfeff;
-}
-
+.case-chip{ background:#fff7ed; }
+.verb-chip{ background:#ecfeff; }
 /* Input */
-input[type="text"]{
-  border-radius: 12px !important;
-}
+input[type="text"]{ border-radius: 12px !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -89,22 +78,35 @@ def normalize(s: str) -> str:
 
 @st.cache_resource(show_spinner=True)
 def load_generator():
+    # Guard against missing dependency that the model needs.
+    try:
+        import sentencepiece  # noqa: F401
+    except Exception:
+        st.error("Missing dependency: sentencepiece. Add `sentencepiece>=0.1.99` to requirements.txt and redeploy.")
+        st.stop()
+
     from transformers import pipeline
-    # Model trained to generate Hungarian surface forms using emMorph tags
+    # mT5-based Hungarian morphological generator trained on emMorph tags
     return pipeline(
         task="text2text-generation",
         model="NYTK/morphological-generator-emmorph-mt5-hungarian"
     )
 
 def build_prompt(lemma: str, pos_code: str, tag: str) -> str:
-    # pos_code is "/N" or "/V"; tag like "[Ine]" or "[Prs.NDef.1Sg]"
-    return f"morph: {lemma} [{pos_code}]{tag}"
+    # Accept "/N" or "/V" (without brackets) and add exactly one set of brackets.
+    pos = pos_code.strip()
+    if pos.startswith("[") and pos.endswith("]"):
+        pos = pos[1:-1]
+    return f"morph: {lemma} [{pos}]{tag}"
 
 def generate_form(lemma: str, pos_code: str, tag: str) -> str:
-    gen = load_generator()
-    prompt = build_prompt(lemma, pos_code, tag)
-    out = gen(prompt, max_new_tokens=8)[0]["generated_text"]
-    return out.strip()
+    try:
+        gen = load_generator()
+        out = gen(build_prompt(lemma, pos_code, tag), max_new_tokens=8)[0]["generated_text"]
+        return out.strip()
+    except Exception as e:
+        st.error(f"Generation failed: {e}")
+        return ""
 
 # Pronoun labels for UI
 PRONOUNS = {
@@ -137,10 +139,9 @@ with st.sidebar:
 
     if source == "Upload CSVs":
         with st.popover("How to format CSVs"):
-            st.write("Upload two CSV files: one for **nouns**, one for **verbs**.")
-            st.write("Each file must include a header row with a single column named **lemma**.")
+            st.write("Upload two CSV files: one for nouns, one for verbs.")
+            st.write("Each file must include a header row with a single column named lemma.")
             st.code("lemma\nház\nkönyv\nember\n", language="text")
-            st.write("And for verbs:")
             st.code("lemma\nlát\nír\nszeret\n", language="text")
             st.caption("Encoding: UTF-8. One lemma per line. No extra columns are required.")
         nouns_file = st.file_uploader("Upload nouns.csv", type=["csv"])
@@ -184,19 +185,19 @@ def load_lemmas():
 nouns, verbs = load_lemmas()
 
 # --------------
-# Build tag pools (emMorph tags hidden from the prompt)
+# Build tag pools (store raw POS codes WITHOUT brackets)
 # --------------
 NOUN_TAGS = []
-if opt_ine: NOUN_TAGS.append(("[/N]", "[Ine]", "Inessive"))
-if opt_ade: NOUN_TAGS.append(("[/N]", "[Ade]", "Adessive"))
+if opt_ine: NOUN_TAGS.append(("/N", "[Ine]", "Inessive"))
+if opt_ade: NOUN_TAGS.append(("/N", "[Ade]", "Adessive"))
 
 VERB_TAGS = []
 if opt_prs_indef:
-    for p in ["1Sg","2Sg","3Sg","1Pl","2Pl","3Pl"]:
-        VERB_TAGS.append(("[/V]", f"[Prs.NDef.{p}]", f"Present indefinite · {PRONOUNS[p]}"))
+    for p in ["1Sg", "2Sg", "3Sg", "1Pl", "2Pl", "3Pl"]:
+        VERB_TAGS.append(("/V", f"[Prs.NDef.{p}]", f"Present indefinite · {PRONOUNS[p]}"))
 if opt_prs_def:
-    for p in ["1Sg","2Sg","3Sg","1Pl","2Pl","3Pl"]:
-        VERB_TAGS.append(("[/V]", f"[Prs.Def.{p}]", f"Present definite · {PRONOUNS[p]}"))
+    for p in ["1Sg", "2Sg", "3Sg", "1Pl", "2Pl", "3Pl"]:
+        VERB_TAGS.append(("/V", f"[Prs.Def.{p}]", f"Present definite · {PRONOUNS[p]}"))
 
 if not NOUN_TAGS and not VERB_TAGS:
     st.info("Choose at least one option in the sidebar to begin.")
@@ -233,15 +234,12 @@ def next_question():
         st.session_state.idx = 0
         st.balloons()
     kind, lemma, pos, tag, label = st.session_state.pool[st.session_state.idx]
-    # UI-friendly prompt:
-    # - Verbs: pronoun + root + label
-    # - Nouns: lemma + case name
     if kind == "V":
         p = tag.split(".")[-1].strip("]")
         pron = PRONOUNS.get(p, "")
         pretty = f"{pron} + {lemma}"
         chip_class = "verb-chip"
-        sublabel = label  # present def/indef + pronoun
+        sublabel = label
     else:
         pretty = f"{lemma} + {label}"
         chip_class = "case-chip"
