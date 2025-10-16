@@ -1,17 +1,9 @@
-# app.py
-# Hungarian Conjugation and Declension Practice
-# Python 3.12+ • Streamlit app with GitHub corpus loading,
-# pastel UI, single-button navigation labeled "Next", AI TTS,
-# full noun practice for 11 cases in singular and plural,
-# and verbs in Present, Past, Conditional (present), and Future,
-# each in both indefinite and definite modes where applicable.
+from __future__ import annotations
 
-# Set safe defaults to avoid inotify watch errors in containerized hosts, before Streamlit import.
+# Set safe defaults to avoid inotify watch errors in containerized hosts, before importing Streamlit.
 import os
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
 os.environ.setdefault("STREAMLIT_SERVER_RUN_ON_SAVE", "false")
-
-from __future__ import annotations
 
 import json
 import random
@@ -250,7 +242,12 @@ with st.sidebar:
     verb_modes = st.multiselect(
         "Select verb modes",
         options=VERB_MODE_OPTIONS,
-        default=["Present Indefinite", "Present Definite", "Past Indefinite", "Past Definite", "Conditional Present Indefinite", "Conditional Present Definite", "Future Indefinite", "Future Definite"],
+        default=[
+            "Present Indefinite", "Present Definite",
+            "Past Indefinite", "Past Definite",
+            "Conditional Present Indefinite", "Conditional Present Definite",
+            "Future Indefinite", "Future Definite"
+        ],
         help="Pick which finite paradigms to practice."
     )
 
@@ -264,7 +261,10 @@ with st.sidebar:
     noun_modes = st.multiselect(
         "Cases",
         options=NOUN_CASE_OPTIONS,
-        default=["Accusative", "Dative", "Inessive", "Superessive", "Adessive", "Illative", "Sublative", "Allative", "Instrumental", "Genitive"],
+        default=[
+            "Accusative", "Dative", "Inessive", "Superessive", "Adessive",
+            "Illative", "Sublative", "Allative", "Instrumental", "Genitive"
+        ],
         help="Practice the most common cases. Genitive here uses the -é possessive form."
     )
     noun_numbers = st.multiselect(
@@ -314,7 +314,7 @@ with st.sidebar:
                         st.error("google-cloud-texttospeech is not installed. Run: pip install google-cloud-texttospeech google-auth")
                     else:
                         sa = st.secrets.get("GOOGLE_TTS_SERVICE_ACCOUNT_JSON", None)
-                        creds = service_account.Credentials.from_service_account_info(sa) if sa else None
+                        creds = service_account.Credentials.from_service_account_info(sa) if isinstance(sa, dict) else None
                         client = texttospeech.TextToSpeechClient(credentials=creds) if creds else texttospeech.TextToSpeechClient()
                         inp = texttospeech.SynthesisInput(text="Szia!")
                         voice = texttospeech.VoiceSelectionParams(language_code="hu-HU")
@@ -968,7 +968,7 @@ def tts_speak_hu(text: str, rate: float) -> Optional[bytes]:
                 st.error("google-cloud-texttospeech is not installed. Run: pip install google-cloud-texttospeech google-auth")
                 return None
             sa = st.secrets.get("GOOGLE_TTS_SERVICE_ACCOUNT_JSON", None)
-            creds = service_account.Credentials.from_service_account_info(sa) if sa else None
+            creds = service_account.Credentials.from_service_account_info(sa) if isinstance(sa, dict) else None
             client = texttospeech.TextToSpeechClient(credentials=creds) if creds else texttospeech.TextToSpeechClient()
             synthesis_input = texttospeech.SynthesisInput(text=text)
             voice = texttospeech.VoiceSelectionParams(language_code="hu-HU")
@@ -997,21 +997,18 @@ with colL:
         c = st.session_state.current
         if st.session_state.kind == "verb":
             pron = PRONOUNS_HU[(c["number"], c["person"])] if show_hu_pronouns else ""
-            mode_label = {
-                ("Ind","Pres"): "present",
-                ("Ind","Past"): "past",
-                ("Cnd","Pres"): "conditional present",
-                ("Ind","Fut"): "future",
-            }[(c["mood"], c["tense"])]
+            mode_map = {("Ind","Pres"): "present", ("Ind","Past"): "past", ("Cnd","Pres"): "conditional present", ("Ind","Fut"): "future"}
+            mode_label = mode_map.get((c["mood"], c["tense"]), "present")
             conj = f"{'definite' if c['definite'] else 'indefinite'} {mode_label}"
-            aux = f"Tense and pronoun: {mode_label}, {pron or f'person {c['person']}, {c['number']}'.capitalize()}"
+            pron_part = pron if pron else f"person {c['person']}, {c['number']}"
+            aux_text = f"Tense and pronoun: {mode_label}, {pron_part}".capitalize()
             st.markdown(
                 f"""
                 <div class="prompt-card">
                   <div><span class="pill">Verb</span><span class="pill">{conj}</span></div>
                   <div class="mono" style="font-size:1.25rem;margin-top:.25rem;"><b>{c["lemma"]}</b></div>
                   <div class="muted">Meaning: {c["gloss"]}</div>
-                  <div class="muted">{aux}</div>
+                  <div class="muted">{aux_text}</div>
                 </div>
                 """,
                 unsafe_allow_html=True
