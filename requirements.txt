@@ -2,3 +2,4 @@ streamlit>=1.34,<2
 transformers>=4.44,<5
 torch
 sentencepiece>=0.1.99
+huggingface-hub>=0.23
