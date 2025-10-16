@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 # Set safe defaults to avoid inotify watch errors in containerized hosts, before importing Streamlit.
 import os
 os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
