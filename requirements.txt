@@ -1,4 +1,11 @@
-streamlit>=1.34,<2
+streamlit==1.50.0
+pandas==2.3.3
+
+# Optional: only needed if you enable the NYTK mT5 generator in Advanced settings
 transformers>=4.44,<5
-torch
+torch==2.3.1
 sentencepiece>=0.1.99
+huggingface-hub>=0.23,<1
+
+# Optional: only needed if you load the corpus from GitHub
+PyGithub>=2.3.0
