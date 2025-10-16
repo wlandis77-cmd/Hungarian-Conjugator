@@ -1,11 +1,10 @@
-streamlit==1.50.0
-pandas==2.3.3
-
-# Optional: only needed if you enable the NYTK mT5 generator in Advanced settings
-transformers>=4.44,<5
-torch==2.3.1
-sentencepiece>=0.1.99
-huggingface-hub>=0.23,<1
-
-# Optional: only needed if you load the corpus from GitHub
-PyGithub>=2.3.0
+streamlit>=1.38
+pandas>=2.2
+numpy>=1.26
+transformers>=4.44
+torch>=2.3
+sentencepiece>=0.2
+PyGithub>=2.3
+gTTS>=2.5
+google-cloud-texttospeech>=2.16
+google-auth>=2.32
