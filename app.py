@@ -1,7 +1,7 @@
 # app.py
 # Hungarian Conjugation and Declension Practice
-# Python 3.12 • Streamlit app with optional GitHub-backed corpus loading
-# Accuracy first: CSV overrides > NYTK mT5 generator (optional) > rule engine fallback
+# Python 3.12 • Streamlit app with optional GitHub-backed corpus loading,
+# pastel UI, simplified navigation without "Next", and AI text-to-speech for Hungarian.
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ try:
 except Exception:
     _GITHUB_OK = False
 
-# Optional neural morphological generator (accurate but heavy on first load)
+# Optional neural morphological generator
 _TRANSFORMERS_OK = False
 try:
     from transformers import pipeline  # pip install transformers torch sentencepiece
@@ -31,7 +31,26 @@ try:
 except Exception:
     pass
 
-# ------------------------- UI THEME AND STYLES -------------------------
+# Optional AI TTS backends
+_HAS_GTTS = False
+try:
+    # pip install gTTS
+    from gtts import gTTS
+    _HAS_GTTS = True
+except Exception:
+    pass
+
+_HAS_GOOGLE_TTS = False
+try:
+    # pip install google-cloud-texttospeech google-auth
+    from google.cloud import texttospeech  # type: ignore
+    from google.oauth2 import service_account  # type: ignore
+    _HAS_GOOGLE_TTS = True
+except Exception:
+    pass
+
+
+# ------------------------- PAGE CONFIG + PASTEL THEME -------------------------
 
 st.set_page_config(
     page_title="Hungarian Conjugations & Declensions Trainer",
@@ -42,28 +61,105 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .big-title { font-size: 1.8rem; font-weight: 700; letter-spacing: .2px; margin-bottom: .25rem; }
-    .subtitle { color: #666; margin-bottom: 1rem; }
-    .prompt-card {
-        border: 1px solid #e6e9ef;
-        padding: 1rem 1.25rem;
-        border-radius: 10px;
-        background: #fafbff;
-        box-shadow: 0 1px 0 rgba(16,24,40,.02);
-        margin-bottom: 1rem;
+    :root{
+      --bg1:#f6f0ff;
+      --bg2:#e9f7ff;
+      --surface:#eef2ff;
+      --surface2:#e7f7f4;
+      --ink:#1f2937;
+      --muted:#4b5563;
+      --accent:#a7c8ff;
+      --accent-ink:#0f172a;
+      --border:#cfd8ee;
+      --pill:#d6efff;
+      --good:#1c8c4e;
+      --bad:#b21b1b;
     }
-    .good { color: #0a7f2e; font-weight: 700; }
-    .bad { color: #b21b1b; font-weight: 700; }
-    .pill { display: inline-block; font-size: .85rem; padding: .1rem .5rem; border: 1px solid #e2e8f0; border-radius: 999px; margin-right: .35rem; background: white; }
-    .muted { color: #6b7280; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+
+    [data-testid="stAppViewContainer"]{
+      background: linear-gradient(135deg,var(--bg1) 0%,var(--bg2) 100%);
+    }
+    [data-testid="stSidebar"]{
+      background: linear-gradient(180deg,#f8eaff 0%,#e6f7ff 100%);
+      border-right: 1px solid var(--border);
+    }
+    [data-testid="stHeader"]{
+      background: transparent;
+    }
+
+    .block-container{
+      padding-top: 1rem;
+    }
+
+    /* Cards and chips */
+    .prompt-card{
+      border: 1px solid var(--border);
+      padding: 1rem 1.25rem;
+      border-radius: 12px;
+      background: var(--surface);
+      box-shadow: 0 1px 0 rgba(16,24,40,.03);
+      margin-bottom: 1rem;
+    }
+    .pill{
+      display:inline-block;
+      font-size:.85rem;
+      padding:.12rem .6rem;
+      border:1px solid var(--border);
+      border-radius:999px;
+      margin-right:.35rem;
+      background: var(--pill);
+    }
+    .big-title{ font-size: 1.8rem; font-weight: 700; letter-spacing: .2px; margin-bottom: .25rem; color:var(--ink); }
+    .subtitle{ color: var(--muted); margin-bottom: 1rem; }
+
+    /* Buttons */
+    .stButton > button{
+      background: var(--accent) !important;
+      color: var(--accent-ink) !important;
+      border: 1px solid var(--border) !important;
+      border-radius: 10px !important;
+      box-shadow: 0 1px 0 rgba(16,24,40,.06) !important;
+    }
+    .stButton > button:hover{
+      filter: brightness(0.98);
+      transform: translateY(-1px);
+      transition: transform .08s ease;
+    }
+
+    /* Inputs */
+    input, textarea, select{
+      background-color: var(--surface) !important;
+      color: var(--ink) !important;
+      border: 1px solid var(--border) !important;
+    }
+    .stTextInput > div > div > input{
+      background-color: var(--surface) !important;
+    }
+    .stSelectbox div[role="combobox"]{
+      background-color: var(--surface) !important;
+      border: 1px solid var(--border) !important;
+    }
+
+    /* Metrics */
+    .metric-card{
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: .75rem 1rem;
+    }
+
+    .good{ color: var(--good); font-weight: 700; }
+    .bad{ color: var(--bad); font-weight: 700; }
+    .muted{ color: var(--muted); }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 st.markdown('<div class="big-title">Hungarian Conjugations and Declensions</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Practice accurate present‑tense verb forms and core noun cases with a fast, clean workflow.</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Practice accurate present‑tense verb forms and core noun cases with a clean pastel interface.</div>', unsafe_allow_html=True)
+
 
 # ------------------------- DATA TYPES -------------------------
 
@@ -71,19 +167,19 @@ st.markdown('<div class="subtitle">Practice accurate present‑tense verb forms 
 class VerbTask:
     lemma: str
     gloss: str
-    definite: bool  # True = definite conjugation, False = indefinite
-    person: int     # 1..3
-    number: str     # "Sing" or "Plur"
-    is_ik: bool     # -ik verb behavior hints
-    ud_key: str     # UD-style feature key for generator/CSV overrides
+    definite: bool
+    person: int
+    number: str
+    is_ik: bool
+    ud_key: str
 
 
 @dataclass(frozen=True)
 class NounTask:
     lemma: str
     gloss: str
-    case: str       # "Ine" or "Ade" (inessive/adessive)
-    ud_key: str     # UD-style feature key for generator/CSV overrides
+    case: str
+    ud_key: str
 
 
 # ------------------------- SETTINGS SIDEBAR -------------------------
@@ -98,13 +194,11 @@ with st.sidebar:
 
     df: Optional[pd.DataFrame] = None
 
-    # GitHub settings
     if source == "Load from GitHub":
         repo_full = st.text_input("owner/repo", placeholder="yourname/yourrepo")
         path_in_repo = st.text_input("path in repo", value="data/hungarian_corpus.csv")
         ref = st.text_input("branch or tag", value="main")
-        token_hint = "Place your PAT in Streamlit secrets as GITHUB_TOKEN."
-        st.caption(token_hint)
+        st.caption("Add GITHUB_TOKEN to Streamlit secrets before loading.")
 
         def load_from_github() -> Optional[pd.DataFrame]:
             if not _GITHUB_OK:
@@ -163,14 +257,57 @@ with st.sidebar:
         prefer_ml = st.selectbox(
             "Inflection strategy",
             ["CSV overrides first, then ML generator, then rules", "CSV overrides only", "CSV overrides then rules only"],
-            help="For maximum accuracy choose the ML generator path. It uses NYTK’s mT5 model and UD features."
+            help="For maximum accuracy choose the ML generator path. It uses UD-style features."
         )
         ignore_accents = st.checkbox("Accept answers that ignore accents", value=True)
         show_hu_pronouns = st.checkbox("Show Hungarian pronouns for verb prompts", value=True)
         allow_reveal = st.checkbox("Allow Reveal Answer", value=True)
-        st.caption("The ML generator requires Transformers and will download a model on first use.")
 
-# ------------------------- CSV CONTRACT -------------------------
+    st.divider()
+
+    tts_expander = st.expander("Pronunciation (AI TTS)")
+    with tts_expander:
+        tts_provider = st.selectbox("TTS provider", ["Off", "gTTS (local, free)", "Google Cloud TTS"], index=0)
+        tts_rate = st.slider("Speaking rate", 0.6, 1.4, 1.0, 0.05)
+        auto_say_answer = st.checkbox("Auto speak correct answer on Reveal or when correct", value=True)
+        st.caption(
+            "For Google Cloud, add a service account JSON to Streamlit secrets as GOOGLE_TTS_SERVICE_ACCOUNT_JSON. "
+            "Hungarian language code is hu-HU."
+        )
+
+        # Quick sanity test
+        if st.button("Test TTS with “Szia!”"):
+            audio = None
+            try:
+                audio = None
+                if tts_provider.startswith("gTTS"):
+                    if not _HAS_GTTS:
+                        st.error("gTTS is not installed. Run: pip install gTTS")
+                    else:
+                        g = gTTS("Szia!", lang="hu")
+                        buf = BytesIO()
+                        g.write_to_fp(buf)
+                        buf.seek(0)
+                        audio = buf.read()
+                elif tts_provider.startswith("Google"):
+                    if not _HAS_GOOGLE_TTS:
+                        st.error("google-cloud-texttospeech is not installed. Run: pip install google-cloud-texttospeech google-auth")
+                    else:
+                        sa = st.secrets.get("GOOGLE_TTS_SERVICE_ACCOUNT_JSON", None)
+                        creds = service_account.Credentials.from_service_account_info(sa) if sa else None
+                        client = texttospeech.TextToSpeechClient(credentials=creds) if creds else texttospeech.TextToSpeechClient()
+                        inp = texttospeech.SynthesisInput(text="Szia!")
+                        voice = texttospeech.VoiceSelectionParams(language_code="hu-HU")
+                        cfg = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=float(tts_rate))
+                        resp = client.synthesize_speech(input=inp, voice=voice, audio_config=cfg)
+                        audio = resp.audio_content
+            except Exception as e:
+                st.error(f"TTS test failed: {e}")
+            if audio:
+                st.audio(audio, format="audio/mp3")
+
+
+# ------------------------- CSV TEMPLATE DOWNLOAD -------------------------
 
 CSV_TEMPLATE = """
 pos,lemma,english,is_ik,forms
@@ -182,6 +319,7 @@ NOUN,bolt,shop,, "{""NOUN Case=Ine|Number=Sing"": ""boltban"", ""NOUN Case=Ade|N
 
 with st.sidebar:
     st.download_button("Download CSV template", data=CSV_TEMPLATE, file_name="hungarian_corpus_template.csv", mime="text/csv")
+
 
 # ------------------------- CORE UTILITIES -------------------------
 
@@ -197,7 +335,6 @@ def has_front_rounded(s: str) -> bool:
     return any(ch in FRONT_R for ch in s)
 
 def last_vowel_group(s: str) -> str:
-    # Helps select linking vowels
     last = None
     for ch in s.lower():
         if ch in ALL_VOWELS:
@@ -205,7 +342,6 @@ def last_vowel_group(s: str) -> str:
     return last or "a"
 
 def harmony_set(s: str) -> str:
-    # "back", "front_unr", "front_r"
     if has_back(s):
         return "back"
     if has_front_rounded(s):
@@ -225,13 +361,10 @@ def normalize_answer(s: str, strip_accents: bool) -> str:
         s = s.translate(ACCENT_STRIP)
     return s.lower()
 
+
 # ------------------------- RULE ENGINE (TARGETED) -------------------------
 
 class HuRules:
-    """Rule-based generator for specific practice modes.
-    Nouns: Inessive (-ban/-ben) and Adessive (-nál/-nél).
-    Verbs: Present tense, prioritizing regular patterns. -ik handling for 1sg and 3sg (indef)."""
-
     @staticmethod
     def inessive(noun: str) -> str:
         h = harmony_set(noun)
@@ -287,7 +420,6 @@ class HuRules:
         v_1sg = {"back": "om", "front_unr": "em", "front_r": "öm"}[h]
         v_2sg = {"back": "od", "front_unr": "ed", "front_r": "öd"}[h]
         v_1pl = {"back": "juk", "front_unr": "jük", "front_r": "jük"}[h]
-        # Heuristic: after vowel use -játok, after consonant use -itek/-itek selection by harmony
         v_2pl_cons = {"back": "játok", "front_unr": "itek", "front_r": "itek"}[h]
         v_2pl_vow = {"back": "játok", "front_unr": "jétek", "front_r": "jétek"}[h]
         v_3pl_default = {"back": "ják", "front_unr": "ik", "front_r": "ik"}[h]
@@ -299,11 +431,9 @@ class HuRules:
         if number == "Sing" and person == 2:
             return lemma + v_2sg
         if number == "Sing" and person == 3:
-            # Default to -ja/-je with assimilation for s/z endings; use -i for many -z verbs like "néz"
             if re.search(r"(z)$", lemma):
                 return lemma + "i"
             if re.search(r"(s|sz|zs)$", lemma):
-                # geminate sibilant + a/e
                 if lemma.endswith("sz"):
                     base = lemma[:-2] + "ssz"
                 elif lemma.endswith("zs"):
@@ -319,7 +449,6 @@ class HuRules:
         if number == "Plur" and person == 2:
             return lemma + (v_2pl_vow if ends_vowel else v_2pl_cons)
         if number == "Plur" and person == 3:
-            # Many -z/-sz verbs use -ik, otherwise -ják/-ik by harmony; this is a heuristic.
             if re.search(r"(z|sz|zs)$", lemma):
                 return lemma + "ik"
             return lemma + v_3pl_default
@@ -342,13 +471,13 @@ def nyt_generate(lemma: str, ud_key: str) -> Optional[str]:
     gen = get_nytk_generator()
     if not gen:
         return None
-    # UD format example: "morph: munka NOUN Case=Acc|Number=Sing"
     prompt = f"morph: {lemma} {ud_key}"
     try:
         out = gen(prompt, max_new_tokens=12, num_return_sequences=1)[0]["generated_text"]
         return out.strip()
     except Exception:
         return None
+
 
 # ------------------------- CORPUS HANDLING -------------------------
 
@@ -363,11 +492,10 @@ def validate_corpus(df: pd.DataFrame) -> Tuple[bool, str]:
 
 @lru_cache(maxsize=4096)
 def lookup_override(forms_json: str | None, ud_key: str) -> Optional[str]:
-    if not forms_json or (isinstance(forms_json, float) and pd.isna(forms_json)):  # NaN safe
+    if not forms_json or (isinstance(forms_json, float) and pd.isna(forms_json)):
         return None
     try:
         data = json.loads(forms_json)
-        # Two keys accepted: exact UD key or simplified fallback
         return data.get(ud_key) or None
     except Exception:
         return None
@@ -387,6 +515,7 @@ def get_is_ik_flag(row) -> Optional[bool]:
     except Exception:
         return None
 
+
 # ------------------------- QUESTION GENERATION -------------------------
 
 PRONOUNS_HU = {
@@ -399,13 +528,10 @@ PRONOUNS_HU = {
 }
 
 def make_ud_key_for_verb(definite: bool, person: int, number: str) -> str:
-    # UD-style feature bundle
-    # Example: VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=1|Number=Sing|Definite=Ind
     dval = "Def" if definite else "Ind"
     return f"VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person={person}|Number={'Sing' if number=='Sing' else 'Plur'}|Definite={dval}"
 
 def make_ud_key_for_noun(case: str) -> str:
-    # Case: "Inessive" -> "Ine", "Adessive" -> "Ade"
     c = "Ine" if case == "Inessive" else "Ade"
     return f"NOUN Case={c}|Number=Sing"
 
@@ -415,13 +541,11 @@ def choose_person_number() -> Tuple[int, str]:
     return person, number
 
 def next_task(df: pd.DataFrame) -> Tuple[str, Dict, str]:
-    # Returns ("verb" or "noun", payload dict, solution string)
     scope = []
     if want_verbs and verb_modes:
         scope.append("verb")
     if want_nouns and noun_modes:
         scope.append("noun")
-
     if not scope:
         st.stop()
 
@@ -463,24 +587,20 @@ def next_task(df: pd.DataFrame) -> Tuple[str, Dict, str]:
     sol = realize_noun(row, task)
     return "noun", task.__dict__, sol
 
-# ------------------------- REALIZATION (INFLECTION) -------------------------
+
+# ------------------------- REALIZATION -------------------------
 
 def realize_from_overrides(row, ud_key: str) -> Optional[str]:
     return lookup_override(row.get("forms", None), ud_key)
 
 def realize_verb(row, task: VerbTask) -> str:
-    # Priority 1: explicit CSV overrides
     override = realize_from_overrides(row, task.ud_key)
     if override:
         return override
-
-    # Priority 2: NYTK mT5 generator, if chosen
     if "ML generator" in prefer_ml and _TRANSFORMERS_OK:
         gen = nyt_generate(task.lemma, task.ud_key)
         if gen:
             return gen
-
-    # Priority 3: rule engine fallback
     if task.definite:
         return HuRules.present_def(task.lemma, task.person, task.number)
     return HuRules.present_indef(task.lemma, task.person, task.number, task.is_ik)
@@ -489,15 +609,14 @@ def realize_noun(row, task: NounTask) -> str:
     override = realize_from_overrides(row, task.ud_key)
     if override:
         return override
-
     if "ML generator" in prefer_ml and _TRANSFORMERS_OK:
         gen = nyt_generate(task.lemma, task.ud_key)
         if gen:
             return gen
-
     if task.case == "Inessive":
         return HuRules.inessive(task.lemma)
     return HuRules.adessive(task.lemma)
+
 
 # ------------------------- SESSION STATE -------------------------
 
@@ -522,9 +641,12 @@ if "kind" not in st.session_state:
     st.session_state.kind = ""
 if "feedback" not in st.session_state:
     st.session_state.feedback = ""
+if "tts_last_audio" not in st.session_state:
+    st.session_state.tts_last_audio = None
 
 def new_question():
     st.session_state.feedback = ""
+    st.session_state.tts_last_audio = None
     if st.session_state.df is None:
         st.warning("Upload or load a corpus CSV to begin.")
         return
@@ -532,6 +654,39 @@ def new_question():
     st.session_state.kind = kind
     st.session_state.current = payload
     st.session_state.solution = solution
+
+
+# ------------------------- AI TTS -------------------------
+
+def tts_speak_hu(text: str, rate: float) -> Optional[bytes]:
+    if not text or tts_provider == "Off":
+        return None
+    try:
+        if tts_provider.startswith("gTTS"):
+            if not _HAS_GTTS:
+                st.error("gTTS is not installed. Run: pip install gTTS")
+                return None
+            t = gTTS(text, lang="hu")
+            fp = BytesIO()
+            t.write_to_fp(fp)
+            fp.seek(0)
+            return fp.read()
+        if tts_provider.startswith("Google"):
+            if not _HAS_GOOGLE_TTS:
+                st.error("google-cloud-texttospeech is not installed. Run: pip install google-cloud-texttospeech google-auth")
+                return None
+            sa = st.secrets.get("GOOGLE_TTS_SERVICE_ACCOUNT_JSON", None)
+            creds = service_account.Credentials.from_service_account_info(sa) if sa else None
+            client = texttospeech.TextToSpeechClient(credentials=creds) if creds else texttospeech.TextToSpeechClient()
+            synthesis_input = texttospeech.SynthesisInput(text=text)
+            voice = texttospeech.VoiceSelectionParams(language_code="hu-HU")
+            audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=float(rate))
+            response = client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
+            return response.audio_content
+    except Exception as e:
+        st.error(f"TTS failed: {e}")
+    return None
+
 
 # ------------------------- MAIN INTERACTION -------------------------
 
@@ -543,9 +698,11 @@ with colL:
     elif st.session_state.df is None:
         st.info("Use the sidebar to upload your corpus or load it from GitHub, then click New Question.")
 
+    # Single navigation control: New Question
     if st.button("New Question", use_container_width=True):
         new_question()
 
+    # Prompt and answer
     if st.session_state.current:
         c = st.session_state.current
         if st.session_state.kind == "verb":
@@ -576,8 +733,26 @@ with colL:
                 unsafe_allow_html=True
             )
 
+        # Optional TTS for the prompt itself
+        colT1, colT2 = st.columns([1, 1])
+        with colT1:
+            if st.button("🔊 Speak prompt"):
+                text = c["lemma"]
+                audio = tts_speak_hu(text, tts_rate)
+                if audio:
+                    st.session_state.tts_last_audio = audio
+        with colT2:
+            if st.button("🔊 Speak correct form"):
+                audio = tts_speak_hu(st.session_state.solution, tts_rate)
+                if audio:
+                    st.session_state.tts_last_audio = audio
+
+        if st.session_state.tts_last_audio:
+            st.audio(st.session_state.tts_last_audio, format="audio/mp3")
+
         answer = st.text_input("Type the correct form")
-        colA, colB, colC = st.columns([1, 1, 1])
+
+        colA, colB = st.columns([1, 1])
         with colA:
             if st.button("Check"):
                 user = normalize_answer(answer, ignore_accents)
@@ -586,14 +761,19 @@ with colL:
                 if user == gold and len(gold) > 0:
                     st.session_state.score += 1
                     st.session_state.feedback = f"<span class='good'>Correct.</span> {st.session_state.solution}"
+                    if auto_say_answer:
+                        audio = tts_speak_hu(st.session_state.solution, tts_rate)
+                        if audio:
+                            st.session_state.tts_last_audio = audio
                 else:
                     st.session_state.feedback = f"<span class='bad'>Not quite.</span> Expected: <b>{st.session_state.solution}</b>"
         with colB:
             if allow_reveal and st.button("Reveal"):
                 st.session_state.feedback = f"Answer: <b>{st.session_state.solution}</b>"
-        with colC:
-            if st.button("Next"):
-                new_question()
+                if auto_say_answer:
+                    audio = tts_speak_hu(st.session_state.solution, tts_rate)
+                    if audio:
+                        st.session_state.tts_last_audio = audio
 
         if st.session_state.feedback:
             st.markdown(st.session_state.feedback, unsafe_allow_html=True)
@@ -601,17 +781,25 @@ with colL:
 with colR:
     acc = st.session_state.score
     tot = st.session_state.total
-    rate = f"{(100 * acc / tot):.0f}%" if tot else "—"
-    st.metric(label="Accuracy", value=rate, delta=f"{acc}/{tot} correct" if tot else "")
+    rate = f"{(100 * acc / tot):.0f}%" if tot else "0%"
+    st.markdown(
+        f"""
+        <div class="metric-card">
+          <div class="muted" style="font-size:.9rem;">Accuracy</div>
+          <div style="font-size:1.6rem; font-weight:700;">{rate}</div>
+          <div class="muted">{acc}/{tot} correct</div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
     if st.session_state.df is not None:
         st.caption("Corpus loaded and cached for quick sampling.")
 
-# ------------------------- FOOTER AND REFERENCES -------------------------
+
+# ------------------------- FOOTER -------------------------
 
 st.caption(
-    "Suffix choices for -ban/-ben and -nál/-nél follow Hungarian vowel harmony and standard case rules. "
-    "Definite and indefinite present endings follow standard paradigms with special treatment for -ik verbs. "
-    "For maximum accuracy, provide explicit forms in the CSV or enable the NYTK mT5 morphological generator in Advanced settings."
+    "Suffix choices for -ban/-ben and -nál/-nél follow standard harmony rules. "
+    "Present tense forms use CSV overrides when available, then the neural generator if enabled, then rules."
 )
-
