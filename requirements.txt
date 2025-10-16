@@ -1,10 +1,11 @@
-streamlit>=1.38
-pandas>=2.2
+# requirements.txt
+streamlit>=1.50
+pandas>=2.3
 numpy>=1.26
-transformers>=4.44
-torch>=2.3
-sentencepiece>=0.2
-PyGithub>=2.3
+transformers>=4.57
+torch>=2.9
+sentencepiece>=0.2.1
+PyGithub>=2.8
 gTTS>=2.5
-google-cloud-texttospeech>=2.16
-google-auth>=2.32
+google-cloud-texttospeech>=2.31
+google-auth>=2.41
