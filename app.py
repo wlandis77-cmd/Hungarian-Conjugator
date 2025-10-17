@@ -1,801 +1,514 @@
-# Pastel Hungarian Morphology Trainer – fixed mapping for “ti” vs “te” (e.g., eszik → esztek for 2pl)
-import os
-os.environ.setdefault("STREAMLIT_SERVER_FILE_WATCHER_TYPE", "none")
-os.environ.setdefault("STREAMLIT_SERVER_RUN_ON_SAVE", "false")
-
-import json
+# -*- coding: utf-8 -*-
+import io
 import random
 import re
 from dataclasses import dataclass
-from functools import lru_cache
-from io import BytesIO
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
+from gtts import gTTS
 
-try:
-    from github import Github
-    _GITHUB_OK = True
-except Exception:
-    _GITHUB_OK = False
+st.set_page_config(page_title="Hungarian Conjugator & Declensions", page_icon="🇭🇺", layout="wide")
 
-_TRANSFORMERS_OK = False
-try:
-    from transformers import pipeline
-    _TRANSFORMERS_OK = True
-except Exception:
-    pass
+PASTEL_CSS = """
+<style>
+:root {
+  --bg: #f3f0ff;
+  --panel: #e8f6ff;
+  --panel-2: #ffeef2;
+  --text: #1f2937;
+  --accent: #a3e3d8;
+  --accent-2: #ffd6a5;
+  --accent-3: #cdeac0;
+  --muted: #b8c1ec;
+}
+.stApp, .stApp > div, .block-container {
+  background: linear-gradient(180deg, var(--bg), #eef7ff 60%);
+}
+.stSidebar, .stSelectbox, .stTextInput, .stButton>button, .stAlert, .stDataFrame, .stRadio, .stCheckbox {
+  border-radius: 14px !important;
+}
+section[data-testid="stSidebar"] {
+  background: var(--panel);
+  border-right: 2px solid #d2e8ff;
+}
+.stButton>button {
+  background: var(--accent);
+  color: var(--text);
+  border: 1px solid #94dacc;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+}
+.stButton>button:hover { filter: brightness(0.97); }
+button[kind="secondary"] {
+  background: var(--accent-2) !important;
+  border: 1px solid #ffc794 !important;
+}
+div[data-baseweb="input"] input {
+  background: #faf2ff !important;
+}
+.stAlert {
+  background: var(--panel-2);
+  border: 1px solid #ffc7d6;
+}
+[data-testid="stMetricValue"] {
+  color: #2b353e;
+}
+::selection { background: #cdeac0; color: #1f2937; }
+</style>
+"""
+st.markdown(PASTEL_CSS, unsafe_allow_html=True)
 
-_HAS_GTTS = False
-try:
-    from gtts import gTTS
-    _HAS_GTTS = True
-except Exception:
-    pass
+PERSON_LABELS = {
+    ("1", "sg"): ("én", "I"),
+    ("2", "sg"): ("te", "you (sg)"),
+    ("3", "sg"): ("ő", "he/she/it"),
+    ("1", "pl"): ("mi", "we"),
+    ("2", "pl"): ("ti", "you (pl)"),
+    ("3", "pl"): ("ők", "they"),
+}
 
-_HAS_GOOGLE_TTS = False
-try:
-    from google.cloud import texttospeech  # type: ignore
-    from google.oauth2 import service_account  # type: ignore
-    _HAS_GOOGLE_TTS = True
-except Exception:
-    pass
+VOWELS_BACK = set("aáoóuú")
+VOWELS_FRONT_UNR = set("eéií")
+VOWELS_FRONT_R = set("öőüű")
 
-st.set_page_config(page_title="Hungarian Conjugations & Declensions Trainer", page_icon="🇭🇺", layout="wide")
+def has_back_vowel(s: str) -> bool:
+    return any(ch in VOWELS_BACK for ch in s)
 
-st.markdown(
-    """
-    <style>
-    :root{
-      --bg1:#f6f0ff;
-      --bg2:#e9f7ff;
-      --surface:#eef2ff;
-      --surface2:#e7f7f4;
-      --ink:#1f2937;
-      --muted:#4b5563;
-      --accent:#a7c8ff;
-      --accent-ink:#0f172a;
-      --border:#cfd8ee;
-      --pill:#d6efff;
-      --good:#1c8c4e;
-      --bad:#b21b1b;
-    }
-    [data-testid="stAppViewContainer"]{
-      background: linear-gradient(135deg,var(--bg1) 0%,var(--bg2) 100%);
-    }
-    [data-testid="stSidebar"]{
-      background: linear-gradient(180deg,#f8eaff 0%,#e6f7ff 100%);
-      border-right: 1px solid var(--border);
-    }
-    [data-testid="stHeader"]{ background: transparent; }
-    .block-container{ padding-top: 1rem; }
-    .prompt-card{
-      border: 1px solid var(--border);
-      padding: 1rem 1.25rem;
-      border-radius: 12px;
-      background: var(--surface);
-      box-shadow: 0 1px 0 rgba(16,24,40,.03);
-      margin-bottom: 1rem;
-    }
-    .pill{
-      display:inline-block;
-      font-size:.85rem;
-      padding:.12rem .6rem;
-      border:1px solid var(--border);
-      border-radius:999px;
-      margin-right:.35rem;
-      background: var(--pill);
-    }
-    .big-title{ font-size: 1.8rem; font-weight: 700; letter-spacing: .2px; margin-bottom: .25rem; color:var(--ink); }
-    .subtitle{ color: var(--muted); margin-bottom: 1rem; }
-    .stButton > button{
-      background: var(--accent) !important;
-      color: var(--accent-ink) !important;
-      border: 1px solid var(--border) !important;
-      border-radius: 10px !important;
-      box-shadow: 0 1px 0 rgba(16,24,40,.06) !important;
-    }
-    .stButton > button:disabled{ opacity:.6 !important; cursor:not-allowed !important; }
-    .stButton > button:hover{ filter:brightness(0.98); transform:translateY(-1px); transition:transform .08s ease; }
-    input, textarea, select{ background-color: var(--surface) !important; color: var(--ink) !important; border: 1px solid var(--border) !important; }
-    .stTextInput > div > div > input{ background-color: var(--surface) !important; }
-    .stSelectbox div[role="combobox"]{ background-color: var(--surface) !important; border: 1px solid var(--border) !important; }
-    .metric-card{ background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: .75rem 1rem; }
-    .good{ color: var(--good); font-weight: 700; }
-    .bad{ color: var(--bad); font-weight: 700; }
-    .muted{ color: var(--muted); }
-    .mono{ font-family: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+def has_front_vowel(s: str) -> bool:
+    return any(ch in VOWELS_FRONT_UNR or ch in VOWELS_FRONT_R for ch in s)
 
-st.markdown('<div class="big-title">Hungarian Conjugations and Declensions</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Accurate paradigms, fast sampling, and a soft pastel UI.</div>', unsafe_allow_html=True)
+def harmony_pair(stem: str, back: str, front: str) -> str:
+    return back if has_back_vowel(stem) else front
 
-@dataclass(frozen=True)
-class VerbTask:
-    lemma: str
-    gloss: str
-    mood: str
+def clean_stem(verb: str) -> str:
+    return re.sub(r"ni$", "", verb)
+
+IRREGULARS = {
+    "eszik": {
+        "present_indef": {
+            ("1","sg"): "eszem",
+            ("2","sg"): "eszel",
+            ("3","sg"): "eszik",
+            ("1","pl"): "eszünk",
+            ("2","pl"): "esztek",
+            ("3","pl"): "esznek",
+        },
+        "past_indef": {
+            ("1","sg"): "ettem",
+            ("2","sg"): "ettél",
+            ("3","sg"): "evett",
+            ("1","pl"): "ettünk",
+            ("2","pl"): "ettetek",
+            ("3","pl"): "ettek",
+        },
+        "cond_present_indef": {
+            ("1","sg"): "ennék",
+            ("2","sg"): "ennél",
+            ("3","sg"): "enne",
+            ("1","pl"): "ennénk",
+            ("2","pl"): "ennétek",
+            ("3","pl"): "ennének",
+        },
+        "inf": "enni",
+    },
+    "iszik": {
+        "present_indef": {
+            ("1","sg"): "iszom",
+            ("2","sg"): "iszol",
+            ("3","sg"): "iszik",
+            ("1","pl"): "iszunk",
+            ("2","pl"): "isztok",
+            ("3","pl"): "isznak",
+        },
+        "past_indef": {
+            ("1","sg"): "ittam",
+            ("2","sg"): "ittál",
+            ("3","sg"): "ivott",
+            ("1","pl"): "ittunk",
+            ("2","pl"): "ittatok",
+            ("3","pl"): "ittak",
+        },
+        "cond_present_indef": {
+            ("1","sg"): "innék",
+            ("2","sg"): "innál",
+            ("3","sg"): "inne",
+            ("1","pl"): "innénk",
+            ("2","pl"): "innétek",
+            ("3","pl"): "innének",
+        },
+        "inf": "inni",
+    },
+    "alszik": {
+        "present_indef": {
+            ("1","sg"): "alszom",
+            ("2","sg"): "alszol",
+            ("3","sg"): "alszik",
+            ("1","pl"): "alszunk",
+            ("2","pl"): "alszotok",
+            ("3","pl"): "alszanak",
+        },
+        "past_indef": {
+            ("1","sg"): "aludtam",
+            ("2","sg"): "aludtál",
+            ("3","sg"): "aludt",
+            ("1","pl"): "aludtunk",
+            ("2","pl"): "aludtatok",
+            ("3","pl"): "aludtak",
+        },
+        "cond_present_indef": {
+            ("1","sg"): "aludnék",
+            ("2","sg"): "aludnál",
+            ("3","sg"): "aludna",
+            ("1","pl"): "aludnánk",
+            ("2","pl"): "aludnátok",
+            ("3","pl"): "aludnának",
+        },
+        "inf": "aludni",
+    },
+}
+
+IRREGULARS_PRESENT_DEF = {
+    "eszik": {
+        ("1","sg"): "eszem",
+        ("2","sg"): "eszed",
+        ("3","sg"): "eszi",
+        ("1","pl"): "esszük",
+        ("2","pl"): "eszitek",
+        ("3","pl"): "eszik",
+    },
+    "iszik": {
+        ("1","sg"): "iszom",
+        ("2","sg"): "iszod",
+        ("3","sg"): "issza",
+        ("1","pl"): "isszuk",
+        ("2","pl"): "isszátok",
+        ("3","pl"): "isszák",
+    },
+    "alszik": {
+        ("1","sg"): "alszom",
+        ("2","sg"): "alszod",
+        ("3","sg"): "alussza",
+        ("1","pl"): "alusszuk",
+        ("2","pl"): "alusszátok",
+        ("3","pl"): "alusszák",
+    },
+}
+
+ENDINGS_PRESENT_INDEF = {
+    ("1","sg"): ["ok","ek","ök"],
+    ("2","sg"): ["sz"],
+    ("3","sg"): [""],
+    ("1","pl"): ["unk","ünk"],
+    ("2","pl"): ["tok","tek","tök"],
+    ("3","pl"): ["nak","nek"],
+}
+ENDINGS_PRESENT_DEF = {
+    ("1","sg"): ["om","em","öm"],
+    ("2","sg"): ["od","ed","öd"],
+    ("3","sg"): ["ja","i"],
+    ("1","pl"): ["juk","jük"],
+    ("2","pl"): ["játok","itek"],
+    ("3","pl"): ["ják","ik"],
+}
+ENDINGS_PAST_INDEF = {
+    ("1","sg"): ["tam","tem"],
+    ("2","sg"): ["tál","tél"],
+    ("3","sg"): ["ott","ett"],
+    ("1","pl"): ["tunk","tünk"],
+    ("2","pl"): ["tatok","tetek"],
+    ("3","pl"): ["tak","tek"],
+}
+ENDINGS_PAST_DEF = {
+    ("1","sg"): ["tam","tem"],
+    ("2","sg"): ["tad","ted"],
+    ("3","sg"): ["ta","te"],
+    ("1","pl"): ["tuk","tük"],
+    ("2","pl"): ["tátok","tétek"],
+    ("3","pl"): ["ták","ték"],
+}
+ENDINGS_COND_INDEF = {
+    ("1","sg"): ["nék","nék"],
+    ("2","sg"): ["nál","nél"],
+    ("3","sg"): ["na","ne"],
+    ("1","pl"): ["nánk","nénk"],
+    ("2","pl"): ["nátok","nétek"],
+    ("3","pl"): ["nának","nének"],
+}
+ENDINGS_COND_DEF = ENDINGS_COND_INDEF.copy()
+
+FUTURE_FOG = {
+    ("1","sg"): "fogok",
+    ("2","sg"): "fogsz",
+    ("3","sg"): "fog",
+    ("1","pl"): "fogunk",
+    ("2","pl"): "fogtok",
+    ("3","pl"): "fognak",
+}
+
+PRONOUN_ORDER = [("1","sg"), ("2","sg"), ("3","sg"), ("1","pl"), ("2","pl"), ("3","pl")]
+
+CASES = {
+    "nominative": "",
+    "accusative": "t",
+    "dative": "nak/nek",
+    "inessive": "ban/ben",
+    "superessive": "n",
+    "adessive": "nál/nél",
+    "illative": "ba/be",
+    "elative": "ból/ből",
+    "allative": "hoz/hez/höz",
+    "ablative": "tól/től",
+    "possessive_é": "é",
+}
+
+def case_suffix(stem: str, case_key: str) -> str:
+    def has_back_vowel(s: str) -> bool:
+        return any(ch in "aáoóuú" for ch in s)
+    def has_front_vowel(s: str) -> bool:
+        return any(ch in "eéiíöőüű" for ch in s)
+    if case_key == "nominative": return ""
+    if case_key == "accusative": return "t"
+    if case_key == "dative": return "nak" if has_back_vowel(stem) else "nek"
+    if case_key == "inessive": return "ban" if has_back_vowel(stem) else "ben"
+    if case_key == "superessive": return "n"
+    if case_key == "adessive": return "nál" if has_back_vowel(stem) else "nél"
+    if case_key == "illative": return "ba" if has_back_vowel(stem) else "be"
+    if case_key == "elative": return "ból" if has_back_vowel(stem) else "ből"
+    if case_key == "allative":
+        if has_back_vowel(stem): return "hoz"
+        return "höz" if any(ch in "öőüű" for ch in stem) else "hez"
+    if case_key == "ablative": return "tól" if has_back_vowel(stem) else "től"
+    if case_key == "possessive_é": return "é"
+    return ""
+
+def join_stem_suffix(stem: str, suffix: str) -> str:
+    if not suffix: return stem
+    return stem + suffix
+
+@dataclass
+class VerbSlot:
     tense: str
-    definite: bool
-    person: int
+    definiteness: str
+    person: str
     number: str
-    is_ik: bool
-    ud_key: str
 
-@dataclass(frozen=True)
-class NounTask:
-    lemma: str
-    gloss: str
-    case: str
-    number: str
-    ud_key: str
+def present_indef_regular(stem: str, slot: VerbSlot) -> str:
+    if slot.person == "3" and slot.number == "sg":
+        return stem
+    if slot.person == "2" and slot.number == "sg":
+        return stem + "sz"
+    if slot.person == "1" and slot.number == "sg":
+        return stem + ("ok" if any(ch in "aáoóuú" for ch in stem) else ("ek" if any(ch in "eéií" for ch in stem) else "ök"))
+    if slot.person == "1" and slot.number == "pl":
+        return stem + ("unk" if any(ch in "aáoóuú" for ch in stem) else "ünk")
+    if slot.person == "2" and slot.number == "pl":
+        if any(ch in "aáoóuú" for ch in stem): return stem + "tok"
+        if any(ch in "öőüű" for ch in stem): return stem + "tök"
+        return stem + "tek"
+    if slot.person == "3" and slot.number == "pl":
+        return stem + ("nak" if any(ch in "aáoóuú" for ch in stem) else "nek")
+    return stem
 
-with st.sidebar:
-    st.header("Settings")
-    source = st.radio("Corpus source", ["Upload CSV", "Load from GitHub"], horizontal=True)
-    df: Optional[pd.DataFrame] = None
-    if source == "Load from GitHub":
-        repo_full = st.text_input("owner/repo", placeholder="yourname/yourrepo")
-        path_in_repo = st.text_input("path in repo", value="data/hungarian_corpus.csv")
-        ref = st.text_input("branch or tag", value="main")
-        st.caption("Add GITHUB_TOKEN to Streamlit secrets before loading.")
-        def load_from_github() -> Optional[pd.DataFrame]:
-            if not _GITHUB_OK:
-                st.error("PyGithub not installed.")
-                return None
-            token = st.secrets.get("GITHUB_TOKEN", None)
-            if not token:
-                st.error("Missing GITHUB_TOKEN in secrets.")
-                return None
-            try:
-                gh = Github(token)
-                repo = gh.get_repo(repo_full)
-                f = repo.get_contents(path_in_repo, ref=ref)
-                return pd.read_csv(BytesIO(f.decoded_content))
-            except Exception as e:
-                st.error(f"GitHub load failed: {e}")
-                return None
-        if st.button("Load CSV from GitHub"):
-            df = load_from_github()
-    else:
-        uploaded = st.file_uploader("Upload corpus CSV", type=["csv"])
-        if uploaded is not None:
-            try:
-                df = pd.read_csv(uploaded)
-            except Exception as e:
-                st.error(f"CSV parse failed: {e}")
-    st.divider()
-    st.subheader("Practice scope")
-    want_verbs = st.checkbox("Verbs", value=True)
-    want_nouns = st.checkbox("Nouns", value=True)
+def present_def_regular(stem: str, slot: VerbSlot) -> str:
+    back = any(ch in "aáoóuú" for ch in stem)
+    front_only = not back
+    if slot.person == "1" and slot.number == "sg":
+        return stem + ("om" if back else ("em" if any(ch in "eéií" for ch in stem) else "öm"))
+    if slot.person == "2" and slot.number == "sg":
+        return stem + ("od" if back else ("ed" if any(ch in "eéií" for ch in stem) else "öd"))
+    if slot.person == "3" and slot.number == "sg":
+        return stem + ("ja" if back else "i")
+    if slot.person == "1" and slot.number == "pl":
+        return stem + ("juk" if back else "jük")
+    if slot.person == "2" and slot.number == "pl":
+        return stem + ("játok" if back else "itek")
+    if slot.person == "3" and slot.number == "pl":
+        return stem + ("ják" if back else "ik")
+    return stem
 
-    VERB_MODE_OPTIONS = [
-        "Present Indefinite",
-        "Present Definite",
-        "Past Indefinite",
-        "Past Definite",
-        "Conditional Present Indefinite",
-        "Conditional Present Definite",
-        "Future Indefinite",
-        "Future Definite",
-    ]
-    verb_modes = st.multiselect("Select verb modes", options=VERB_MODE_OPTIONS, default=VERB_MODE_OPTIONS)
+def past_regular(stem: str, slot: VerbSlot) -> str:
+    back = any(ch in "aáoóuú" for ch in stem)
+    endings = ENDINGS_PAST_DEF if slot.definiteness == "definite" else ENDINGS_PAST_INDEF
+    a, b = endings[(slot.person, slot.number)]
+    return stem + (a if back else b)
 
-    NOUN_CASE_OPTIONS = [
-        "Nominative", "Accusative", "Dative",
-        "Inessive", "Superessive", "Adessive",
-        "Illative", "Sublative", "Allative",
-        "Instrumental", "Genitive",
-    ]
-    noun_modes = st.multiselect("Cases", options=NOUN_CASE_OPTIONS, default=[c for c in NOUN_CASE_OPTIONS if c != "Nominative"])
-    noun_numbers = st.multiselect("Noun number", options=["Singular", "Plural"], default=["Singular", "Plural"])
+def cond_present_regular(stem: str, slot: VerbSlot) -> str:
+    back = any(ch in "aáoóuú" for ch in stem)
+    endings = ENDINGS_COND_DEF if slot.definiteness == "definite" else ENDINGS_COND_INDEF
+    a, b = endings[(slot.person, slot.number)]
+    base = stem + (a if back else b)
+    if slot.definiteness == "definite" and slot.person == "3" and slot.number == "sg":
+        return stem + ("nája" if back else "néje")
+    return base
 
-    st.divider()
-    advanced = st.expander("Advanced accuracy")
-    with advanced:
-        prefer_ml = st.selectbox("Inflection strategy", ["CSV overrides first, then ML generator, then rules", "CSV overrides only", "CSV overrides then rules only"])
-        ignore_accents = st.checkbox("Accept answers that ignore accents", value=True)
-        show_hu_pronouns = st.checkbox("Show Hungarian pronouns for verb prompts", value=True)
-        allow_reveal = st.checkbox("Allow Reveal Answer", value=True)
+def future_with_fog(lemma: str, slot: VerbSlot) -> str:
+    base_inf = IRREGULARS.get(lemma, {}).get("inf", None)
+    inf = base_inf if base_inf else (lemma if lemma.endswith("ni") else lemma + "ni")
+    return f"{inf} {FUTURE_FOG[(slot.person, slot.number)]}"
 
-    st.divider()
-    tts_expander = st.expander("Pronunciation")
-    with tts_expander:
-        tts_provider = st.selectbox("TTS provider", ["Off", "gTTS (local, free)", "Google Cloud TTS"], index=0)
-        tts_rate = st.slider("Speaking rate", 0.6, 1.4, 1.0, 0.05)
-        auto_say_answer = st.checkbox("Auto speak correct answer", value=True)
+def conj(lemma: str, slot: VerbSlot) -> str:
+    l = lemma.strip().lower()
+    if l in IRREGULARS:
+        if slot.tense == "present" and slot.definiteness == "indefinite":
+            return IRREGULARS[l]["present_indef"][(slot.person, slot.number)]
+        if slot.tense == "present" and slot.definiteness == "definite":
+            return IRREGULARS_PRESENT_DEF.get(l, {}).get((slot.person, slot.number), present_def_regular(clean_stem(l), slot))
+        if slot.tense == "past":
+            irregular = IRREGULARS[l].get("past_indef", None)
+            if irregular and slot.definiteness == "indefinite":
+                return irregular[(slot.person, slot.number)]
+            return past_regular(clean_stem(l), slot)
+        if slot.tense == "conditional":
+            irregular = IRREGULARS[l].get("cond_present_indef", None)
+            if irregular and slot.definiteness == "indefinite":
+                return irregular[(slot.person, slot.number)]
+            return cond_present_regular(clean_stem(l), slot)
+        if slot.tense == "future":
+            return future_with_fog(l, slot)
 
-CSV_TEMPLATE = """
-pos,lemma,english,is_ik,forms
-VERB,kér,to ask,False,"{""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=1|Number=Sing|Definite=Ind"": ""kérek"", ""VERB VerbForm=Fin|Mood=Ind|Tense=Past|Person=3|Number=Sing|Definite=Def"": ""kérte""}"
-VERB,alszik,to sleep,True,"{""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=2|Number=Plur|Definite=Ind"": ""alszotok""}"
-VERB,eszik,to eat,True,"{""VERB VerbForm=Fin|Mood=Ind|Tense=Pres|Person=2|Number=Plur|Definite=Ind"": ""esztek""}"
-NOUN,bolt,shop,,"{""NOUN Case=Ine|Number=Sing"": ""boltban"", ""NOUN Case=Ine|Number=Plur"": ""boltokban"", ""NOUN Case=Gen|Number=Plur"": ""boltoké""}"
-""".strip()
+    stem = clean_stem(l)
+    if slot.tense == "present":
+        return present_indef_regular(stem, slot) if slot.definiteness == "indefinite" else present_def_regular(stem, slot)
+    if slot.tense == "past":
+        return past_regular(stem, slot)
+    if slot.tense == "conditional":
+        return cond_present_regular(stem, slot)
+    if slot.tense == "future":
+        return future_with_fog(l, slot)
+    return stem
 
-with st.sidebar:
-    st.download_button("Download CSV template", data=CSV_TEMPLATE, file_name="hungarian_corpus_template.csv", mime="text/csv")
+def init_state():
+    ss = st.session_state
+    ss.setdefault("score", 0)
+    ss.setdefault("total", 0)
+    ss.setdefault("current_task", None)
+    ss.setdefault("checked", False)
+    ss.setdefault("verblist", [])
+    ss.setdefault("nounlist", [])
 
-# Harmony
-BACK_VOWELS = set("aáoóuú")
-FRONT_UNR = set("eéií")
-FRONT_R = set("öőüű")
-ALL_VOWELS = BACK_VOWELS | FRONT_UNR | FRONT_R
+init_state()
 
-def has_back(s: str) -> bool: return any(ch in BACK_VOWELS for ch in s)
-def has_front_rounded(s: str) -> bool: return any(ch in FRONT_R for ch in s)
-def last_vowel(s: str) -> Optional[str]:
-    last=None
-    for ch in s.lower():
-        if ch in ALL_VOWELS: last=ch
-    return last
-def harmony_set(s: str) -> str:
-    if has_back(s): return "back"
-    if has_front_rounded(s): return "front_r"
-    return "front_unr"
+st.sidebar.header("Practice settings")
+mode = st.sidebar.radio("Practice", ["Verb conjugations", "Noun declensions"])
 
-ACCENT_STRIP = str.maketrans({"á":"a","é":"e","í":"i","ó":"o","ö":"o","ő":"o","ú":"u","ü":"u","ű":"u",
-                               "Á":"a","É":"e","Í":"i","Ó":"o","Ö":"o","Ő":"o","Ú":"u","Ü":"u","Ű":"u"})
-def normalize_answer(s: str, strip: bool) -> str:
-    s=s.strip()
-    if strip: s=s.translate(ACCENT_STRIP)
-    return s.lower()
+tense = st.sidebar.selectbox("Tense", ["present", "past", "conditional", "future"])
+definiteness = st.sidebar.selectbox("Definiteness", ["indefinite", "definite"]) if mode == "Verb conjugations" else "indefinite"
 
-# Nouns
-def pluralize(noun: str) -> str:
-    if noun.endswith("a"): return noun[:-1]+"á"+"k"
-    if noun.endswith("e"): return noun[:-1]+"é"+"k"
-    if noun[-1].lower() in ALL_VOWELS: return noun+"k"
-    return noun + ("ok" if harmony_set(noun)=="back" else "ök" if harmony_set(noun)=="front_r" else "ek")
+case_keys = list(CASES.keys())
+selected_cases = st.sidebar.multiselect("Cases to practice", case_keys, default=["nominative","accusative","dative","inessive","adessive","illative","elative","allative","ablative","superessive","possessive_é"])
 
-class HuNoun:
-    @staticmethod
-    def nominative(n, num): return n if num=="Sing" else pluralize(n)
-    @staticmethod
-    def dative(n, num): 
-        b = n if num=="Sing" else pluralize(n)
-        return b + ("nak" if harmony_set(b)=="back" else "nek")
-    @staticmethod
-    def inessive(n, num):
-        b = n if num=="Sing" else pluralize(n)
-        return b + ("ban" if harmony_set(b)=="back" else "ben")
-    @staticmethod
-    def superessive(n, num):
-        b = n if num=="Sing" else pluralize(n)
-        if b[-1].lower() in ALL_VOWELS and num=="Sing": return b+"n"
-        h=harmony_set(b); return b + ("on" if h=="back" else "ön" if h=="front_r" else "en")
-    @staticmethod
-    def adessive(n, num):
-        b = n if num=="Sing" else pluralize(n)
-        return b + ("nál" if harmony_set(b)=="back" else "nél")
-    @staticmethod
-    def illative(n,num):
-        b = n if num=="Sing" else pluralize(n)
-        return b + ("ba" if harmony_set(b)=="back" else "be")
-    @staticmethod
-    def sublative(n,num):
-        b = n if num=="Sing" else pluralize(n)
-        return b + ("ra" if harmony_set(b)=="back" else "re")
-    @staticmethod
-    def allative(n,num):
-        b = n if num=="Sing" else pluralize(n)
-        h=harmony_set(b); return b + ("hoz" if h=="back" else "höz" if h=="front_r" else "hez")
-    @staticmethod
-    def instrumental(n,num):
-        b = n if num=="Sing" else pluralize(n)
-        ending = "al" if harmony_set(b)=="back" else "el"
-        if b[-1].lower() in ALL_VOWELS: return b + ("val" if harmony_set(b)=="back" else "vel")
-        if b.endswith(("sz","zs","cs","gy","ny","ty","ly")): return b + b[-2:] + ending
-        last=b[-1]; return b + last + ending
-    @staticmethod
-    def genitive(n,num):
-        if num=="Sing":
-            if n.endswith("a"): return n[:-1]+"á"+"é"
-            if n.endswith("e"): return n[:-1]+"é"+"é"
-            return n+"é"
-        b = pluralize(n); return b+"é"
-    @staticmethod
-    def accusative(n,num):
-        b = n if num=="Sing" else pluralize(n)
-        if b.endswith("a"): return b[:-1]+"á"+"t"
-        if b.endswith("e"): return b[:-1]+"é"+"t"
-        if b[-1].lower() in ALL_VOWELS: return b+"t"
-        last=b[-1].lower(); bigram=b[-2:].lower() if len(b)>=2 else ""
-        sibil = last in {"s","z","c"} or bigram in {"sz","zs","cs","dz","dzs"}
-        dental = last in {"t","d"}
-        plural_k = last=="k"
-        lv = "a" if last_vowel(b) in {"a","á"} else "e" if last_vowel(b) in {"e","é"} else ("o" if harmony_set(b)=="back" else "ö" if harmony_set(b)=="front_r" else "e")
-        return b + (lv+"t" if (dental or sibil or plural_k) else "t")
+st.sidebar.subheader("Upload CSVs")
+verbs_csv = st.sidebar.file_uploader("verbs.csv", type=["csv"])
+nouns_csv = st.sidebar.file_uploader("nouns.csv", type=["csv"])
 
-# Verbs
-def stem_for_ik(lemma: str, is_ik: bool) -> str:
-    return lemma[:-2] if is_ik and lemma.endswith("ik") else lemma
-
-DIGRAPHS=["dzs","dz","sz","zs","cs","gy","ny","ty","ly"]
-def last_grapheme(s:str)->str:
-    for g in DIGRAPHS:
-        if s.endswith(g): return g
-    return s[-1] if s else ""
-
-def needs_link_vowel_3pl(base:str)->bool:
-    if not base: return False
-    g1=last_grapheme(base)
-    idx=len(base)-len(g1)
-    if idx<=0: return False
-    prev=base[idx-1].lower()
-    return prev not in ALL_VOWELS
-
-IRREGULARS: Dict[str, Dict[Tuple[str,str,bool,int,str], str]] = {}
-def add_irreg(lemma, entries): IRREGULARS.setdefault(lemma, {}).update(entries)
-
-# eszik – present indefinite (to ensure ti→esztek never maps to te→eszel)
-add_irreg("eszik", {
-    ("Pres","Ind",False,1,"Sing"): "eszem",
-    ("Pres","Ind",False,2,"Sing"): "eszel",
-    ("Pres","Ind",False,3,"Sing"): "eszik",
-    ("Pres","Ind",False,1,"Plur"): "eszünk",
-    ("Pres","Ind",False,2,"Plur"): "esztek",
-    ("Pres","Ind",False,3,"Plur"): "esznek",
-})
-# iszik – present indefinite
-add_irreg("iszik", {
-    ("Pres","Ind",False,1,"Sing"): "iszom",
-    ("Pres","Ind",False,2,"Sing"): "iszol",
-    ("Pres","Ind",False,3,"Sing"): "iszik",
-    ("Pres","Ind",False,1,"Plur"): "iszunk",
-    ("Pres","Ind",False,2,"Plur"): "isztok",
-    ("Pres","Ind",False,3,"Plur"): "isznak",
-})
-# alszik – present indefinite
-add_irreg("alszik", {
-    ("Pres","Ind",False,1,"Sing"): "alszom",
-    ("Pres","Ind",False,2,"Sing"): "alszol",
-    ("Pres","Ind",False,3,"Sing"): "alszik",
-    ("Pres","Ind",False,1,"Plur"): "alszunk",
-    ("Pres","Ind",False,2,"Plur"): "alszotok",
-    ("Pres","Ind",False,3,"Plur"): "alszanak",
-})
-
-class HuVerb:
-    @staticmethod
-    def is_ik(lemma: str, csv_flag: Optional[bool]) -> bool:
-        if csv_flag is True: return True
-        if csv_flag is False: return False
-        return lemma.endswith("ik")
-
-    @staticmethod
-    def pres_indef(lemma: str, person: int, number: str, is_ik: bool) -> str:
-        irr = IRREGULARS.get(lemma, {})
-        key = ("Pres","Ind",False,person,number)
-        if key in irr: return irr[key]
-
-        base = stem_for_ik(lemma, is_ik)
-        h = harmony_set(base)
-        v_ok = {"back":"ok","front_unr":"ek","front_r":"ök"}[h]
-        v_1pl = {"back":"unk","front_unr":"ünk","front_r":"ünk"}[h]
-        v_2pl = {"back":"tok","front_unr":"tek","front_r":"tök"}[h]
-        v_3pl_n = {"back":"nak","front_unr":"nek","front_r":"nek"}[h]
-        v_3pl_an = {"back":"anak","front_unr":"enek","front_r":"enek"}[h]
-
-        if number=="Sing" and person==1:
-            if is_ik:
-                v={"back":"om","front_unr":"em","front_r":"öm"}[h]
-                return base+v
-            return base+v_ok
-        if number=="Sing" and person==2:
-            if re.search(r"(s|z|sz|zs)$", base):
-                link={"back":"ol","front_unr":"el","front_r":"öl"}[h]
-                return base+link
-            return base+"sz"
-        if number=="Sing" and person==3:
-            return base+"ik" if is_ik else base
-        if number=="Plur" and person==1: return base+v_1pl
-        if number=="Plur" and person==2: return base+v_2pl
-        if number=="Plur" and person==3: return base+(v_3pl_an if needs_link_vowel_3pl(base) else v_3pl_n)
-        return base
-
-    @staticmethod
-    def pres_def(lemma: str, person: int, number: str) -> str:
-        h=harmony_set(lemma)
-        v_1sg={"back":"om","front_unr":"em","front_r":"öm"}[h]
-        v_2sg={"back":"od","front_unr":"ed","front_r":"öd"}[h]
-        v_1pl={"back":"juk","front_unr":"jük","front_r":"jük"}[h]
-        v_2pl_cons={"back":"játok","front_unr":"itek","front_r":"itek"}[h]
-        v_2pl_vow={"back":"játok","front_unr":"jétek","front_r":"jétek"}[h]
-        v_3pl_default={"back":"ják","front_unr":"ik","front_r":"ik"}[h]
-        ends_vowel = lemma[-1].lower() in ALL_VOWELS
-
-        if number=="Sing" and person==1: return lemma+v_1sg
-        if number=="Sing" and person==2: return lemma+v_2sg
-        if number=="Sing" and person==3:
-            if re.search(r"(z)$", lemma): return lemma+"i"
-            if re.search(r"(s|sz|zs)$", lemma):
-                base=lemma
-                if lemma.endswith("sz"): base=lemma[:-2]+"ssz"
-                elif lemma.endswith("zs"): base=lemma[:-2]+"zzs"
-                elif lemma.endswith("s"): base=lemma[:-1]+"ss"
-                return base + ("a" if h=="back" else "e")
-            return lemma + ("ja" if h=="back" else "je")
-        if number=="Plur" and person==1: return lemma+v_1pl
-        if number=="Plur" and person==2: return lemma + (v_2pl_vow if ends_vowel else v_2pl_cons)
-        if number=="Plur" and person==3:
-            if re.search(r"(z|sz|zs)$", lemma): return lemma+"ik"
-            return lemma+v_3pl_default
-        return lemma
-
-    @staticmethod
-    def past_indef(lemma: str, person: int, number: str) -> str:
-        h=harmony_set(lemma)
-        if lemma=="eszik":
-            stem="ett"
-            if number=="Sing" and person==1: return "ettem"
-            if number=="Sing" and person==2: return "ettél"
-            if number=="Sing" and person==3: return "evett"
-            if number=="Plur" and person==1: return "ettünk"
-            if number=="Plur" and person==2: return "ettetek"
-            if number=="Plur" and person==3: return "ettek"
-        if lemma=="iszik":
-            if number=="Sing" and person==1: return "ittam"
-            if number=="Sing" and person==2: return "ittál"
-            if number=="Sing" and person==3: return "ivott"
-            if number=="Plur" and person==1: return "ittunk"
-            if number=="Plur" and person==2: return "ittatok"
-            if number=="Plur" and person==3: return "ittak"
-        # default
-        if number=="Sing" and person==1: return lemma+"tam" if h=="back" else lemma+"tem"
-        if number=="Sing" and person==2: return lemma+("tál" if h=="back" else "tél")
-        if number=="Sing" and person==3: return lemma+"tt"
-        if number=="Plur" and person==1: return lemma+("tunk" if h=="back" else "tünk")
-        if number=="Plur" and person==2: return lemma+("tatok" if h=="back" else "tetek")
-        if number=="Plur" and person==3: return lemma+("tak" if h=="back" else "tek")
-        return lemma+"tt"
-
-    @staticmethod
-    def past_def(lemma: str, person: int, number: str) -> str:
-        if lemma=="eszik":
-            if number=="Sing" and person==1: return "ettem"
-            if number=="Sing" and person==2: return "etted"
-            if number=="Sing" and person==3: return "ette"
-            if number=="Plur" and person==1: return "ettük"
-            if number=="Plur" and person==2: return "ettétek"
-            if number=="Plur" and person==3: return "ették"
-        if lemma=="iszik":
-            if number=="Sing" and person==1: return "ittam"
-            if number=="Sing" and person==2: return "ittad"
-            if number=="Sing" and person==3: return "itta"
-            if number=="Plur" and person==1: return "ittuk"
-            if number=="Plur" and person==2: return "ittátok"
-            if number=="Plur" and person==3: return "itták"
-        h=harmony_set(lemma)
-        if number=="Sing" and person==1: return lemma+("tam" if h=="back" else "tem")
-        if number=="Sing" and person==2: return lemma+("tad" if h=="back" else "ted")
-        if number=="Sing" and person==3: return lemma+("ta" if h=="back" else "te")
-        if number=="Plur" and person==1: return lemma+("tuk" if h=="back" else "tük")
-        if number=="Plur" and person==2: return lemma+("tátok" if h=="back" else "tétek")
-        if number=="Plur" and person==3: return lemma+("ták" if h=="back" else "ték")
-        return lemma+("ta" if h=="back" else "te")
-
-    @staticmethod
-    def cond_indef(lemma: str, person: int, number: str) -> str:
-        h=harmony_set(lemma)
-        if number=="Sing" and person==1: return lemma+"nék"
-        if number=="Sing" and person==2: return lemma+("nál" if h=="back" else "nél")
-        if number=="Sing" and person==3: return lemma+("na" if h=="back" else "ne")
-        if number=="Plur" and person==1: return lemma+("nánk" if h=="back" else "nénk")
-        if number=="Plur" and person==2: return lemma+("nátok" if h=="back" else "nétek")
-        if number=="Plur" and person==3: return lemma+("nának" if h=="back" else "nének")
-        return lemma+"nék"
-
-    @staticmethod
-    def cond_def(lemma: str, person: int, number: str) -> str:
-        h=harmony_set(lemma)
-        if number=="Sing" and person==1: return lemma+("nám" if h=="back" else "ném")
-        if number=="Sing" and person==2: return lemma+("nád" if h=="back" else "néd")
-        if number=="Sing" and person==3: return lemma+("ná" if h=="back" else "né")
-        if number=="Plur" and person==1: return lemma+("nánk" if h=="back" else "nénk")
-        if number=="Plur" and person==2: return lemma+("nátok" if h=="back" else "nétek")
-        if number=="Plur" and person==3: return lemma+("nák" if h=="back" else "nék")
-        return lemma+("nám" if h=="back" else "ném")
-
-    @staticmethod
-    def infinitive(lemma: str) -> str:
-        base = lemma[:-2] if lemma.endswith("ik") else lemma
-        return base+"ni"
-
-    @staticmethod
-    def fog_indef(person:int, number:str)->str:
-        if number=="Sing" and person==1: return "fogok"
-        if number=="Sing" and person==2: return "fogsz"
-        if number=="Sing" and person==3: return "fog"
-        if number=="Plur" and person==1: return "fogunk"
-        if number=="Plur" and person==2: return "fogtok"
-        if number=="Plur" and person==3: return "fognak"
-        return "fog"
-
-    @staticmethod
-    def fog_def(person:int, number:str)->str:
-        if number=="Sing" and person==1: return "fogom"
-        if number=="Sing" and person==2: return "fogod"
-        if number=="Sing" and person==3: return "fogja"
-        if number=="Plur" and person==1: return "fogjuk"
-        if number=="Plur" and person==2: return "fogjátok"
-        if number=="Plur" and person==3: return "fogják"
-        return "fogja"
-
-    @staticmethod
-    def future_form(lemma: str, definite: bool, person: int, number: str) -> str:
-        aux = HuVerb.fog_def(person, number) if definite else HuVerb.fog_indef(person, number)
-        return f"{aux} {HuVerb.infinitive(lemma)}"
-
-@st.cache_resource(show_spinner=False)
-def get_nytk_generator():
-    if not _TRANSFORMERS_OK: return None
-    try: return pipeline(task="text2text-generation", model="NYTK/morphological-generator-ud-mt5-hungarian")
-    except Exception: return None
-
-def nyt_generate(lemma:str, ud_key:str)->Optional[str]:
-    gen=get_nytk_generator()
-    if not gen: return None
+if verbs_csv:
     try:
-        out = gen(f"morph: {lemma} {ud_key}", max_new_tokens=16, num_return_sequences=1)[0]["generated_text"]
-        return out.strip()
-    except Exception:
-        return None
+        dfv = pd.read_csv(verbs_csv)
+        st.session_state.verblist = list(dfv.fillna("").itertuples(index=False, name=None))
+        st.sidebar.success(f"Loaded {len(st.session_state.verblist)} verbs")
+    except Exception as e:
+        st.sidebar.error(f"Verb CSV error: {e}")
 
-REQUIRED_COLS={"pos","lemma","english"}
-def validate_corpus(df:pd.DataFrame)->Tuple[bool,str]:
-    miss=REQUIRED_COLS - set(df.columns)
-    if miss: return False, f"Missing required columns: {', '.join(miss)}"
-    return True,"ok"
-
-@lru_cache(maxsize=4096)
-def lookup_override(forms_json: str|None, ud_key: str)->Optional[str]:
-    if not forms_json or (isinstance(forms_json,float) and pd.isna(forms_json)): return None
+if nouns_csv:
     try:
-        data=json.loads(forms_json)
-        return data.get(ud_key) or None
-    except Exception:
-        return None
+        dfn = pd.read_csv(nouns_csv)
+        st.session_state.nounlist = list(dfn.fillna("").itertuples(index=False, name=None))
+        st.sidebar.success(f"Loaded {len(st.session_state.nounlist)} nouns")
+    except Exception as e:
+        st.sidebar.error(f"Noun CSV error: {e}")
 
-def get_is_ik_flag(row)->Optional[bool]:
-    try:
-        val=row.get("is_ik", None)
-        if pd.isna(val): return None
-        if isinstance(val,bool): return val
-        s=str(val).strip().lower()
-        if s in {"true","1","yes"}: return True
-        if s in {"false","0","no"}: return False
-        return None
-    except Exception:
-        return None
+enable_tts = st.sidebar.toggle("Play prompt TTS", value=False)
+voice_lang = st.sidebar.selectbox("TTS language code", ["hu","en"], index=0)
 
-PRONOUNS_HU={("Sing",1):"én",("Sing",2):"te",("Sing",3):"ő",("Plur",1):"mi",("Plur",2):"ti",("Plur",3):"ők"}
-CASE_TO_UD={"Nominative":"Nom","Accusative":"Acc","Dative":"Dat","Inessive":"Ine","Superessive":"Sup","Adessive":"Ade","Illative":"Ill","Sublative":"Sub","Allative":"All","Instrumental":"Ins","Genitive":"Gen"}
-
-def parse_verb_mode(mode:str)->Tuple[str,str,bool]:
-    if mode.startswith("Present"): return "Ind","Pres","Definite" in mode
-    if mode.startswith("Past"): return "Ind","Past","Definite" in mode
-    if mode.startswith("Conditional"): return "Cnd","Pres","Definite" in mode
-    return "Ind","Fut","Definite" in mode
-
-def make_ud_key_for_verb(mood:str, tense:str, definite:bool, person:int, number:str)->str:
-    dval="Def" if definite else "Ind"
-    return f"VERB VerbForm=Fin|Mood={mood}|Tense={tense}|Person={person}|Number={'Sing' if number=='Sing' else 'Plur'}|Definite={dval}"
-
-def make_ud_key_for_noun(case:str, number:str)->str:
-    return f"NOUN Case={CASE_TO_UD[case]}|Number={'Sing' if number=='Sing' else 'Plur'}"
-
-def choose_person_number()->Tuple[int,str]:
-    return random.choice([(1,"Sing"),(2,"Sing"),(3,"Sing"),(1,"Plur"),(2,"Plur"),(3,"Plur")])
-
-def safe_gloss(val)->str: return "" if pd.isna(val) else str(val)
-
-def realize_from_overrides(row, ud_key:str)->Optional[str]:
-    return lookup_override(row.get("forms", None), ud_key)
-
-def realize_verb(row, task)->str:
-    override = realize_from_overrides(row, task.ud_key)
-    if override: return override
-    if "ML generator" in prefer_ml and _TRANSFORMERS_OK:
-        gen = nyt_generate(task.lemma, task.ud_key)
-        if gen: return gen
-    if task.tense=="Pres" and task.mood=="Ind":
-        return HuVerb.pres_def(task.lemma, task.person, task.number) if task.definite else HuVerb.pres_indef(task.lemma, task.person, task.number, task.is_ik)
-    if task.tense=="Past" and task.mood=="Ind":
-        return HuVerb.past_def(task.lemma, task.person, task.number) if task.definite else HuVerb.past_indef(task.lemma, task.person, task.number)
-    if task.tense=="Pres" and task.mood=="Cnd":
-        return HuVerb.cond_def(task.lemma, task.person, task.number) if task.definite else HuVerb.cond_indef(task.lemma, task.person, task.number)
-    if task.tense=="Fut" and task.mood=="Ind":
-        return HuVerb.future_form(task.lemma, task.definite, task.person, task.number)
-    return task.lemma
-
-def realize_noun(row, task)->str:
-    override = realize_from_overrides(row, task.ud_key)
-    if override: return override
-    if "ML generator" in prefer_ml and _TRANSFORMERS_OK:
-        gen = nyt_generate(task.lemma, task.ud_key)
-        if gen: return gen
-    c, n = task.case, task.number
-    if c=="Nominative": return HuNoun.nominative(task.lemma, n)
-    if c=="Accusative": return HuNoun.accusative(task.lemma, n)
-    if c=="Dative": return HuNoun.dative(task.lemma, n)
-    if c=="Inessive": return HuNoun.inessive(task.lemma, n)
-    if c=="Superessive": return HuNoun.superessive(task.lemma, n)
-    if c=="Adessive": return HuNoun.adessive(task.lemma, n)
-    if c=="Illative": return HuNoun.illative(task.lemma, n)
-    if c=="Sublative": return HuNoun.sublative(task.lemma, n)
-    if c=="Allative": return HuNoun.allative(task.lemma, n)
-    if c=="Instrumental": return HuNoun.instrumental(task.lemma, n)
-    if c=="Genitive": return HuNoun.genitive(task.lemma, n)
-    return task.lemma
-
-def next_task(df:pd.DataFrame)->Tuple[str,dict,str]:
-    scope=[]
-    if want_verbs and verb_modes: scope.append("verb")
-    if want_nouns and noun_modes and noun_numbers: scope.append("noun")
-    if not scope: st.stop()
-    which=random.choice(scope)
-
-    if which=="verb":
-        sub=df[df["pos"].str.upper().eq("VERB")]
-        if sub.empty: st.stop()
-        row=sub.sample(1).iloc[0]
-        mode_choice=random.choice(verb_modes)
-        mood, tense, definite = parse_verb_mode(mode_choice)
-        person, number = choose_person_number()
-        ud_key = make_ud_key_for_verb(mood, tense, definite, person, number)
-        is_ik = HuVerb.is_ik(str(row["lemma"]), get_is_ik_flag(row))
-        task = VerbTask(lemma=str(row["lemma"]), gloss=safe_gloss(row["english"]), mood=mood, tense=tense, definite=definite, person=person, number=number, is_ik=is_ik, ud_key=ud_key)
-        sol = realize_verb(row, task)
-        return "verb", task.__dict__, sol
-
-    sub=df[df["pos"].str.upper().eq("NOUN")]
-    if sub.empty: st.stop()
-    row=sub.sample(1).iloc[0]
-    case=random.choice(noun_modes)
-    number="Sing" if random.choice(noun_numbers)=="Singular" else "Plur"
-    ud_key=make_ud_key_for_noun(case, number)
-    task=NounTask(lemma=str(row["lemma"]), gloss=safe_gloss(row["english"]), case=case, number=number, ud_key=ud_key)
-    sol=realize_noun(row, task)
-    return "noun", task.__dict__, sol
-
-# Session state
-if "df" not in st.session_state: st.session_state.df=None
-if df is not None:
-    ok,msg=validate_corpus(df)
-    if ok: st.session_state.df=df.copy()
-    else: st.error(msg)
-
-for key, default in [("score",0),("total",0),("current",None),("solution",""),("kind",""),("feedback",""),("tts_last_audio",None),("checked",False)]:
-    if key not in st.session_state: st.session_state[key]=default
-
-def new_question():
-    st.session_state.feedback=""
-    st.session_state.tts_last_audio=None
-    st.session_state.checked=False
-    if st.session_state.df is None:
-        st.warning("Upload or load a corpus CSV to begin."); return
-    kind, payload, solution = next_task(st.session_state.df)
-    st.session_state.kind=kind
-    st.session_state.current=payload
-    st.session_state.solution=solution
-
-def tts_speak_hu(text:str, rate:float)->Optional[bytes]:
-    if not text or tts_provider=="Off": return None
-    try:
-        if tts_provider.startswith("gTTS"):
-            if not _HAS_GTTS: return None
-            g=gTTS(text, lang="hu")
-            buf=BytesIO(); g.write_to_fp(buf); buf.seek(0)
-            return buf.read()
-        if tts_provider.startswith("Google"):
-            if not _HAS_GOOGLE_TTS: return None
-            sa=st.secrets.get("GOOGLE_TTS_SERVICE_ACCOUNT_JSON", None)
-            creds=service_account.Credentials.from_service_account_info(sa) if isinstance(sa, dict) else None
-            client=texttospeech.TextToSpeechClient(credentials=creds) if creds else texttospeech.TextToSpeechClient()
-            inp=texttospeech.SynthesisInput(text=text)
-            voice=texttospeech.VoiceSelectionParams(language_code="hu-HU")
-            cfg=texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.MP3, speaking_rate=float(rate))
-            resp=client.synthesize_speech(input=inp, voice=voice, audio_config=cfg)
-            return resp.audio_content
-    except Exception:
-        return None
+def next_task(mode, tense, definiteness, selected_cases):
+    if mode == "Verb conjugations" and st.session_state.verblist:
+        verb_root, meaning = random.choice(st.session_state.verblist)
+        person, number = random.choice([("1","sg"),("2","sg"),("3","sg"),("1","pl"),("2","pl"),("3","pl")])
+        slot = VerbSlot(tense=tense, definiteness=definiteness, person=person, number=number)
+        expected = conj(verb_root, slot)
+        pron_hu, pron_en = PERSON_LABELS[(person, number)]
+        prompt = f"Conjugate “{verb_root}” ({meaning}) in {slot.tense} {slot.definiteness}, for {pron_hu}."
+        return {"kind":"verb","lemma":verb_root,"meaning":meaning,"slot":slot,"expected":expected,"prompt":prompt,"pron_hu":pron_hu,"pron_en":pron_en}
+    if mode == "Noun declensions" and st.session_state.nounlist:
+        noun, meaning = random.choice(st.session_state.nounlist)
+        case_key = random.choice(selected_cases) if selected_cases else "nominative"
+        suf = case_suffix(noun, case_key)
+        expected = join_stem_suffix(noun, suf)
+        prompt = f"Decline “{noun}” ({meaning}) in case: {case_key.replace('_',' ')}."
+        return {"kind":"noun","noun":noun,"meaning":meaning,"case_key":case_key,"expected":expected,"prompt":prompt}
     return None
 
-colL,colR=st.columns([2,1])
+def set_new_task():
+    st.session_state.current_task = next_task(mode, tense, definiteness, selected_cases)
+    st.session_state.checked = False
+    st.session_state.last_answer = ""
 
-with colL:
-    if st.session_state.current is None and st.session_state.df is not None:
-        new_question()
-    elif st.session_state.df is None:
-        st.info("Use the sidebar to upload your corpus or load it from GitHub, then click Next.")
+if st.session_state.current_task is None:
+    set_new_task()
 
-    if st.button("Next", use_container_width=True):
-        new_question()
+left, right = st.columns([2,1])
 
-    if st.session_state.current:
-        c=st.session_state.current
-        if st.session_state.kind=="verb":
-            pron = PRONOUNS_HU[(c["number"], c["person"])] if show_hu_pronouns else ""
-            mode_map = {("Ind","Pres"):"present",("Ind","Past"):"past",("Cnd","Pres"):"conditional present",("Ind","Fut"):"future"}
-            mode_label = mode_map.get((c["mood"], c["tense"]), "present")
-            conj = f"{'definite' if c['definite'] else 'indefinite'} {mode_label}"
-            pron_part = pron if pron else f"person {c['person']}, {c['number']}"
-            st.markdown(
-                f"""
-                <div class="prompt-card">
-                  <div><span class="pill">Verb</span><span class="pill">{conj}</span></div>
-                  <div class="mono" style="font-size:1.25rem;margin-top:.25rem;"><b>{c["lemma"]}</b></div>
-                  <div class="muted">Meaning: {c["gloss"]}</div>
-                  <div class="muted">Tense and pronoun: {mode_label}, {pron_part}</div>
-                </div>
-                """, unsafe_allow_html=True
-            )
+with left:
+    st.title("Hungarian Practice")
+    task = st.session_state.current_task
+    if not task:
+        st.info("Upload at least one CSV to begin.")
+    else:
+        st.write(task["prompt"])
+        if task["kind"] == "verb":
+            meta = f"Tense: {task['slot'].tense}, Definiteness: {task['slot'].definiteness}, Pronoun: {task['pron_hu']} ({task['pron_en']})"
+            st.caption(meta)
         else:
-            st.markdown(
-                f"""
-                <div class="prompt-card">
-                  <div><span class="pill">Noun</span><span class="pill">{c["case"]} • {c["number"]}</span></div>
-                  <div class="mono" style="font-size:1.25rem;margin-top:.25rem;"><b>{c["lemma"]}</b></div>
-                  <div class="muted">Meaning: {c["gloss"]}</div>
-                </div>
-                """, unsafe_allow_html=True
-            )
+            st.caption(f"Case: {task['case_key']}")
 
-        colT1, colT2 = st.columns([1,1])
-        with colT1:
-            if st.button("🔊 Speak prompt"):
-                audio=tts_speak_hu(c["lemma"], 1.0)
-                if audio: st.session_state.tts_last_audio=audio
-        with colT2:
-            if st.button("🔊 Speak correct form"):
-                audio=tts_speak_hu(st.session_state.solution, 1.0)
-                if audio: st.session_state.tts_last_audio=audio
-        if st.session_state.tts_last_audio:
-            st.audio(st.session_state.tts_last_audio, format="audio/mp3")
+        if enable_tts:
+            try:
+                tts_text = task["prompt"]
+                mp3 = io.BytesIO()
+                gTTS(text=tts_text, lang=voice_lang, slow=False).write_to_fp(mp3)
+                st.audio(mp3.getvalue(), format="audio/mp3")
+            except Exception as e:
+                st.warning(f"TTS error: {e}")
 
-        answer = st.text_input("Type the correct form")
+        answer = st.text_input("Type the correct form", value=st.session_state.get("last_answer",""), disabled=st.session_state.checked, key="answer_input")
 
-        colA,colB=st.columns([1,1])
-        with colA:
-            if st.button("Check", disabled=st.session_state.checked or not answer.strip()):
-                user=normalize_answer(answer, ignore_accents)
-                gold=normalize_answer(st.session_state.solution, ignore_accents)
-                st.session_state.total += 1
-                if user==gold and len(gold)>0:
-                    st.session_state.score += 1
-                    st.session_state.feedback = f"<span class='good'>Correct.</span> {st.session_state.solution}"
-                    audio=tts_speak_hu(st.session_state.solution, 1.0)
-                    if audio: st.session_state.tts_last_audio=audio
-                else:
-                    st.session_state.feedback = f"<span class='bad'>Not quite.</span> Expected: <b>{st.session_state.solution}</b>"
-                st.session_state.checked=True
-        with colB:
-            if allow_reveal and st.button("Reveal"):
-                st.session_state.feedback=f"Answer: <b>{st.session_state.solution}</b>"
-                audio=tts_speak_hu(st.session_state.solution, 1.0)
-                if audio: st.session_state.tts_last_audio=audio
+        c1, c2 = st.columns([1,1])
+        with c1:
+            check_clicked = st.button("Check", disabled=st.session_state.checked or task is None, type="primary")
+        with c2:
+            next_clicked = st.button("Next", type="secondary")
 
-        if st.session_state.feedback:
-            st.markdown(st.session_state.feedback, unsafe_allow_html=True)
+        if check_clicked and not st.session_state.checked:
+            st.session_state.checked = True
+            st.session_state.last_answer = answer.strip()
+            expected = task["expected"]
+            given = answer.strip().lower()
+            canon = lambda s: re.sub(r"[\\s\\-]+","", s.lower())
+            if canon(given) == canon(expected):
+                st.success("Correct!")
+                st.session_state.score += 1
+            else:
+                st.error(f"Not quite. Expected: {expected}")
+            st.session_state.total += 1
 
-with colR:
-    acc=st.session_state.score; tot=st.session_state.total
-    rate=f"{(100*acc/tot):.0f}%" if tot else "0%"
-    st.markdown(
-        f"""
-        <div class="metric-card">
-          <div class="muted" style="font-size:.9rem;">Accuracy</div>
-          <div style="font-size:1.6rem; font-weight:700;">{rate}</div>
-          <div class="muted">{acc}/{tot} correct</div>
-        </div>
-        """, unsafe_allow_html=True
-    )
-    if st.session_state.df is not None:
-        st.caption("Corpus loaded and cached for quick sampling.")
+        if next_clicked:
+            set_new_task()
+            st.rerun()
 
-st.caption("Covers 10 major cases plus the -é genitive possessive; verbs across present/past/conditional/future with definite vs. indefinite. Irregulars like eszik/iszik/alszik hard-coded to prevent ti/te mix‑ups.")
+with right:
+    st.subheader("Progress")
+    st.metric("Score", f"{st.session_state.score}/{st.session_state.total}")
+    if st.session_state.total > 0:
+        pct = 100 * st.session_state.score / st.session_state.total
+        st.caption(f"Accuracy: {pct:.1f}%")
+    st.divider()
+    st.subheader("Now practicing")
+    st.write(f"Mode: **{mode}**")
+    if mode == "Verb conjugations":
+        st.write(f"Tense: **{tense}**  |  Definiteness: **{definiteness}**")
+    else:
+        st.write("Cases: " + ", ".join(selected_cases) if selected_cases else "nominative")
+    st.divider()
+    st.subheader("Notes")
+    st.write("Futures are built with **fog** + infinitive. Irregulars **eszik/iszik/alszik** have targeted overrides. The prompt's person (te vs ti) is exactly the slot used for evaluation, fixing the earlier mismatch.")
