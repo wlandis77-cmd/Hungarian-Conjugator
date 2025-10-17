@@ -1,11 +1,10 @@
-# requirements.txt
-streamlit>=1.50
-pandas>=2.3
+streamlit>=1.31
+pandas>=2.2
 numpy>=1.26
-transformers>=4.57
-torch>=2.9
-sentencepiece>=0.2.1
 PyGithub>=2.8
 gTTS>=2.5
 google-cloud-texttospeech>=2.31
 google-auth>=2.41
+# Optional: swap in a real FST backend later (commented to keep deploy simple)
+# hfst>=3.15
+# pynini>=2.1.6
