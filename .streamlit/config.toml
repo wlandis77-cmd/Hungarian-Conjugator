@@ -1,3 +1,8 @@
+[emmorph]
+# Absolute path to your compiled HFST transducer from emMorph
+hfst_path = "/home/willl/emMorph/hfst/hu.hfstol"
+
 [server]
+# Quiet file-watching to avoid inotify limits in WSL/containers
 fileWatcherType = "none"
 runOnSave = false
