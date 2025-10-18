@@ -1,10 +1,16 @@
-streamlit>=1.31
-pandas>=2.2
-numpy>=1.26
-PyGithub>=2.8
-gTTS>=2.5
-google-cloud-texttospeech>=2.31
-google-auth>=2.41
-# Optional: swap in a real FST backend later (commented to keep deploy simple)
-# hfst>=3.15
-# pynini>=2.1.6
+# Core
+streamlit
+pandas
+toml
+
+# emMorph runtime
+hfst-optimized-lookup
+
+# Nice-to-have (optional; comment out if you don't want them)
+gTTS
+PyGithub
+# transformers
+# torch
+# sentencepiece
+# google-cloud-texttospeech
+# google-auth
