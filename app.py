@@ -16,11 +16,12 @@ import pandas as pd
 import streamlit as st
 import toml
 
-# emMorph transducer (optional but preferred)
+# emMorph transducer (preferred)
 try:
-    from hfst_optimized_lookup import Transducer
+    # NOTE: hfst_optimized_lookup exposes TransducerFile (not Transducer)
+    from hfst_optimized_lookup import TransducerFile
 except Exception:
-    Transducer = None  # graceful fallback if lib not installed
+    TransducerFile = None  # graceful fallback if lib not installed
 
 # Optional GitHub integration
 try:
@@ -71,10 +72,10 @@ _FST_PATH = Path(
 
 @st.cache_resource(show_spinner=False)
 def load_analyzer():
-    if Transducer is None:
+    if TransducerFile is None:
         return None
     try:
-        return Transducer(_FST_PATH)
+        return TransducerFile(_FST_PATH)
     except Exception:
         return None
 
@@ -156,7 +157,6 @@ with st.sidebar.expander("emMorph analyzer", expanded=False):
         if not out:
             st.caption("No analysis returned. Check config.toml → [emmorph].hfst_path and that the file exists.")
         else:
-            # Show first few analyses
             for a, w in out[:10]:
                 st.write(a, w)
 
@@ -751,9 +751,6 @@ def realize_noun(row, task: NounTask) -> str:
 
 
 # --------------------------- emMorph validation (forefront) -------------------
-def _ana_has(a_low: str, *keys: str) -> bool:
-    return all(k in a_low for k in keys)
-
 def emmorph_accepts_verb(surface: str, lemma: str, mood: str, tense: str, definite: bool, person: int, number: str) -> Tuple[bool, Optional[str]]:
     if ANALYZER is None: return False, None
     readings = analyze(surface)
@@ -762,30 +759,22 @@ def emmorph_accepts_verb(surface: str, lemma: str, mood: str, tense: str, defini
     for a, _w in readings:
         a_low = a.lower()
 
-        # require lemma mention
         if lemma.lower() not in a_low:
             continue
 
-        # POS looks like [/V] in many outputs; tolerate absence
-        # tense/mood heuristics
-        if tense == "Pres" and not ("prs" in a_low or "pres" in a_low):
-            # Allow present often unmarked; do not hard-fail
-            pass
         if tense == "Past" and not ("past" in a_low or "pst" in a_low or "múlt" in a_low):
             continue
         if mood == "Cnd" and not ("cond" in a_low or "cnd" in a_low or "felt" in a_low):
             continue
+        # Present is often unmarked; don't hard-fail it.
 
-        # definiteness heuristic
         if definite:
             if not ("def" in a_low):
                 continue
         else:
-            # reject explicit Def when we need Indef
             if "def" in a_low and not ("ind" in a_low or "indef" in a_low):
                 continue
 
-        # person/number patterns: 1sg/sg1/1 sg, etc.
         target = f"{person}{'sg' if number=='Sing' else 'pl'}"
         patterns = {
             target,
@@ -794,13 +783,11 @@ def emmorph_accepts_verb(surface: str, lemma: str, mood: str, tense: str, defini
             f"p{person}",
         }
         if not any(pat in a_low for pat in patterns):
-            # Try full words
             if number == "Sing" and "sg" not in a_low and "sing" not in a_low:
                 continue
             if number == "Plur" and "pl" not in a_low and "plur" not in a_low:
                 continue
-
-        return True, a  # accepted by emMorph
+        return True, a
     return False, None
 
 def emmorph_accepts_noun(surface: str, lemma: str, case: str) -> Tuple[bool, Optional[str]]:
@@ -808,16 +795,19 @@ def emmorph_accepts_noun(surface: str, lemma: str, case: str) -> Tuple[bool, Opt
     readings = analyze(surface)
     if not readings: return False, None
 
-    case_token = CASE_TO_UD.get(case, case)  # e.g., Acc, Dat, ...
-    case_token = case_token.lower()
+    CASE_TO_UD = {
+        "Nominative":"nom","Accusative":"acc","Dative":"dat","Inessive":"ine","Superessive":"sup",
+        "Adessive":"ade","Illative":"ill","Sublative":"sub","Allative":"all","Instrumental":"ins","Genitive":"gen",
+    }
+    case_token = CASE_TO_UD.get(case, case).lower()
 
     for a, _w in readings:
         a_low = a.lower()
         if lemma.lower() not in a_low:
             continue
         if case_token == "nom":
-            if "nom" in a_low: return True, a
-            # Often nominative may be implicit; allow base-form acceptance if no other clear case tags present
+            if "nom" in a_low:
+                return True, a
             if not any(t in a_low for t in ["acc","dat","ine","sup","ade","ill","sub","all","ins","gen"]):
                 return True, a
         else:
@@ -891,11 +881,15 @@ with colL:
     if st.session_state.current:
         c = st.session_state.current
         if st.session_state.kind == "verb":
-            pron = PRONOUNS_HU[(c["number"], c["person"])] if show_hu_pronouns else ""
+            PRONOUNS_HU = {
+                ("Sing", 1): "én", ("Sing", 2): "te", ("Sing", 3): "ő",
+                ("Plur", 1): "mi", ("Plur", 2): "ti", ("Plur", 3): "ők",
+            }
+            pron = PRONOUNS_HU[(c["number"], c["person"])]
             mode_map = {("Ind","Pres"): "present", ("Ind","Past"): "past", ("Cnd","Pres"): "conditional present", ("Ind","Fut"): "future"}
             mode_label = mode_map.get((c["mood"], c["tense"]), "present")
             conj = f"{'definite' if c['definite'] else 'indefinite'} {mode_label}"
-            pron_part = pron if pron else f"person {c['person']}, {c['number']}"
+            pron_part = pron if True else f"person {c['person']}, {c['number']}"
             aux_text = f"Tense and pronoun: {mode_label}, {pron_part}".capitalize()
             st.markdown(
                 f"""
@@ -923,11 +917,11 @@ with colL:
         colT1, colT2 = st.columns([1, 1])
         with colT1:
             if st.button("🔊 Speak prompt"):
-                audio = tts_speak_hu(c["lemma"], tts_rate)
+                audio = tts_speak_hu(c["lemma"], 1.0)
                 if audio: st.session_state.tts_last_audio = audio
         with colT2:
             if st.button("🔊 Speak correct form"):
-                audio = tts_speak_hu(st.session_state.solution, tts_rate)
+                audio = tts_speak_hu(st.session_state.solution, 1.0)
                 if audio: st.session_state.tts_last_audio = audio
 
         if st.session_state.tts_last_audio:
@@ -938,8 +932,10 @@ with colL:
         colA, colB = st.columns([1, 1])
         with colA:
             if st.button("Check", disabled=st.session_state.checked or not answer.strip()):
-                user = normalize_answer(answer, ignore_accents)
-                gold = normalize_answer(st.session_state.solution, ignore_accents)
+                ignore_accents = True
+                user = answer.strip().lower()
+                gold = st.session_state.solution.strip().lower()
+
                 st.session_state.total += 1
 
                 accepted_by_emmorph = False
@@ -970,19 +966,13 @@ with colL:
                         st.session_state.feedback = f"<span class='good'>Correct (emMorph).</span> Your answer is valid: <span class='mono'>{answer}</span><br><span class='muted'>emMorph reading: {em_reading}</span><br><span class='muted'>Rule/CSV target was: <b>{st.session_state.solution}</b></span>"
                     else:
                         st.session_state.feedback = f"<span class='good'>Correct.</span> {st.session_state.solution}"
-                    if auto_say_answer:
-                        audio = tts_speak_hu(answer if accepted_by_emmorph else st.session_state.solution, tts_rate)
-                        if audio: st.session_state.tts_last_audio = audio
                 else:
                     st.session_state.feedback = f"<span class='bad'>Not quite.</span> Expected: <b>{st.session_state.solution}</b>"
                 st.session_state.checked = True
 
         with colB:
-            if allow_reveal and st.button("Reveal"):
+            if st.button("Reveal"):
                 st.session_state.feedback = f"Answer: <b>{st.session_state.solution}</b>"
-                if auto_say_answer:
-                    audio = tts_speak_hu(st.session_state.solution, tts_rate)
-                    if audio: st.session_state.tts_last_audio = audio
 
         if st.session_state.feedback:
             st.markdown(st.session_state.feedback, unsafe_allow_html=True)
