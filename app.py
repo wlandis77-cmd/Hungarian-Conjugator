@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Iterable
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +18,7 @@ import toml
 
 # emMorph transducer (preferred)
 try:
-    # NOTE: hfst_optimized_lookup exposes TransducerFile (not Transducer)
+    # NOTE: hfst_optimized_lookup exposes TransducerFile on many builds
     from hfst_optimized_lookup import TransducerFile
 except Exception:
     TransducerFile = None  # graceful fallback if lib not installed
@@ -90,6 +90,28 @@ def analyze(surface: str):
     except Exception:
         return []
 
+def _iter_readings(readings: Iterable):
+    """
+    Normalize lookup results to (analysis:str, weight:any).
+    Accepts tuples/lists, strings, or objects with .analysis/.weight.
+    """
+    for item in readings:
+        try:
+            if isinstance(item, (tuple, list)):
+                if len(item) >= 2:
+                    yield str(item[0]), item[1]
+                elif len(item) == 1:
+                    yield str(item[0]), ""
+                else:
+                    yield str(item), ""
+            elif hasattr(item, "analysis"):
+                yield str(getattr(item, "analysis")), getattr(item, "weight", "")
+            else:
+                # plain string or unknown object
+                yield str(item), ""
+        except Exception:
+            yield str(item), ""
+
 
 # --------------------------- page config & theme -----------------------------
 st.set_page_config(
@@ -157,7 +179,7 @@ with st.sidebar.expander("emMorph analyzer", expanded=False):
         if not out:
             st.caption("No analysis returned. Check config.toml → [emmorph].hfst_path and that the file exists.")
         else:
-            for a, w in out[:10]:
+            for a, w in list(_iter_readings(out))[:10]:
                 st.write(a, w)
 
 
@@ -756,7 +778,7 @@ def emmorph_accepts_verb(surface: str, lemma: str, mood: str, tense: str, defini
     readings = analyze(surface)
     if not readings: return False, None
 
-    for a, _w in readings:
+    for a, _w in _iter_readings(readings):
         a_low = a.lower()
 
         if lemma.lower() not in a_low:
@@ -769,7 +791,7 @@ def emmorph_accepts_verb(surface: str, lemma: str, mood: str, tense: str, defini
         # Present is often unmarked; don't hard-fail it.
 
         if definite:
-            if not ("def" in a_low):
+            if "def" not in a_low:
                 continue
         else:
             if "def" in a_low and not ("ind" in a_low or "indef" in a_low):
@@ -801,7 +823,7 @@ def emmorph_accepts_noun(surface: str, lemma: str, case: str) -> Tuple[bool, Opt
     }
     case_token = CASE_TO_UD.get(case, case).lower()
 
-    for a, _w in readings:
+    for a, _w in _iter_readings(readings):
         a_low = a.lower()
         if lemma.lower() not in a_low:
             continue
@@ -818,13 +840,19 @@ def emmorph_accepts_noun(surface: str, lemma: str, case: str) -> Tuple[bool, Opt
 
 # --------------------------- session state -----------------------------------
 if "df" not in st.session_state: st.session_state.df = None
-if df is not None:
+if 'score' not in st.session_state: st.session_state.score = 0
+if 'total' not in st.session_state: st.session_state.total = 0
+if 'current' not in st.session_state: st.session_state.current = None
+if 'solution' not in st.session_state: st.session_state.solution = ""
+if 'kind' not in st.session_state: st.session_state.kind = ""
+if 'feedback' not in st.session_state: st.session_state.feedback = ""
+if 'tts_last_audio' not in st.session_state: st.session_state.tts_last_audio = None
+if 'checked' not in st.session_state: st.session_state.checked = False
+
+if "df" in locals() and df is not None:
     ok, msg = validate_corpus(df)
     if ok: st.session_state.df = df.copy()
     else:  st.error(msg)
-
-for k, v in {"score":0, "total":0, "current":None, "solution":"", "kind":"", "feedback":"", "tts_last_audio":None, "checked":False}.items():
-    if k not in st.session_state: st.session_state[k] = v
 
 def new_question():
     st.session_state.feedback = ""
@@ -841,8 +869,17 @@ def new_question():
 
 # --------------------------- TTS helper --------------------------------------
 def tts_speak_hu(text: str, rate: float) -> Optional[bytes]:
-    if not text or tts_provider == "Off":
+    if not text:
         return None
+    try:
+        if st.session_state.get("tts_provider","Off") == "Off":
+            return None
+    except Exception:
+        pass
+
+    if tts_provider == "Off":
+        return None
+
     try:
         if tts_provider.startswith("gTTS"):
             if not _HAS_GTTS:
@@ -885,12 +922,11 @@ with colL:
                 ("Sing", 1): "én", ("Sing", 2): "te", ("Sing", 3): "ő",
                 ("Plur", 1): "mi", ("Plur", 2): "ti", ("Plur", 3): "ők",
             }
-            pron = PRONOUNS_HU[(c["number"], c["person"])]
             mode_map = {("Ind","Pres"): "present", ("Ind","Past"): "past", ("Cnd","Pres"): "conditional present", ("Ind","Fut"): "future"}
             mode_label = mode_map.get((c["mood"], c["tense"]), "present")
             conj = f"{'definite' if c['definite'] else 'indefinite'} {mode_label}"
-            pron_part = pron if True else f"person {c['person']}, {c['number']}"
-            aux_text = f"Tense and pronoun: {mode_label}, {pron_part}".capitalize()
+            pron = PRONOUNS_HU[(c["number"], c["person"])]
+            aux_text = f"Tense and pronoun: {mode_label}, {pron}".capitalize()
             st.markdown(
                 f"""
                 <div class="prompt-card">
@@ -932,7 +968,6 @@ with colL:
         colA, colB = st.columns([1, 1])
         with colA:
             if st.button("Check", disabled=st.session_state.checked or not answer.strip()):
-                ignore_accents = True
                 user = answer.strip().lower()
                 gold = st.session_state.solution.strip().lower()
 
@@ -940,6 +975,7 @@ with colL:
 
                 accepted_by_emmorph = False
                 em_reading = None
+                c = st.session_state.current
 
                 if st.session_state.kind == "verb":
                     ok, em_reading = emmorph_accepts_verb(
